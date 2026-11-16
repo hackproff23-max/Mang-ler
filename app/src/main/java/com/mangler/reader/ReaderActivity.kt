@@ -4,6 +4,7 @@ import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.drawable.GradientDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -20,6 +21,7 @@ import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
@@ -38,17 +40,33 @@ class ReaderActivity : AppCompatActivity() {
     private lateinit var seek: SeekBar
     private lateinit var progress: ProgressBar
 
+    // Painel de tamanho
+    private lateinit var sizePanel: LinearLayout
+    private lateinit var btnAuto: TextView
+    private lateinit var btnOriginal: TextView
+    private lateinit var sizeSeek: SeekBar
+    private lateinit var sizeValue: TextView
+    private var updatingPanel = false
+
     private val io: ExecutorService = Executors.newFixedThreadPool(2)
     private val ui = Handler(Looper.getMainLooper())
     private var source: PageSource? = null
+    private var adapter: PageAdapter? = null
     private var rtl = true
     private var overlayVisible = false
     private var webMode = false
+
+    // Padrão: 0 (tamanho original). Salvo entre páginas e entre aberturas do app.
+    private var sizing = Sizing(Sizing.ORIGINAL, 0)
+    private var sizeLevel = 0
+    private var insets = intArrayOf(0, 0, 0, 0)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("mangler", MODE_PRIVATE)
         rtl = prefs.getBoolean("rtl", true)
+        sizeLevel = prefs.getInt("size_level", 0).coerceIn(0, 100)
+        sizing = Sizing(prefs.getInt("size_mode", Sizing.ORIGINAL).coerceIn(0, 2), sizeLevel)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (Build.VERSION.SDK_INT >= 28) {
@@ -103,7 +121,7 @@ class ReaderActivity : AppCompatActivity() {
         }
         root.addView(progress)
 
-        // Barra superior: voltar, contador e direção de leitura
+        // Barra superior: voltar, contador, tamanho e direção de leitura
         topBar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
@@ -120,6 +138,7 @@ class ReaderActivity : AppCompatActivity() {
             layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
         }
         topBar.addView(pageLabel)
+        topBar.addView(textBtn("⤢") { toggleSizePanel() })
         val dirBtn = textBtn(dirText()) {}
         dirBtn.setOnClickListener {
             rtl = !rtl
@@ -151,7 +170,132 @@ class ReaderActivity : AppCompatActivity() {
         bottomBar.addView(seek)
         root.addView(bottomBar)
 
+        buildSizePanel(root)
+
+        // Área útil: desconta recortes de tela (e barras do sistema, se estiverem visíveis)
+        ViewCompat.setOnApplyWindowInsetsListener(root) { _, wi ->
+            val i = wi.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+            insets = intArrayOf(i.left, i.top, i.right, i.bottom)
+            pushSizing()
+            wi
+        }
+
         setContentView(root)
+    }
+
+    private fun buildSizePanel(root: FrameLayout) {
+        sizePanel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#F2241C3A"))
+                cornerRadius = dp(16).toFloat()
+            }
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+            layoutParams = FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply {
+                leftMargin = dp(12); rightMargin = dp(12); bottomMargin = dp(84)
+            }
+            elevation = dp(8).toFloat()
+            isClickable = true
+            visibility = View.GONE
+        }
+
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        btnAuto = chip("Automático") {
+            sizing = Sizing(Sizing.AUTO, sizeLevel)
+            sizeChanged(true)
+        }
+        btnOriginal = chip("Tamanho original") {
+            sizeLevel = 0
+            sizing = Sizing(Sizing.ORIGINAL, 0)
+            sizeChanged(true)
+        }
+        row.addView(btnAuto)
+        row.addView(btnOriginal)
+        sizePanel.addView(row)
+
+        val sliderRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_LTR
+            setPadding(0, dp(6), 0, 0)
+        }
+        sizeSeek = SeekBar(this).apply {
+            max = 100
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
+                    if (!fromUser || updatingPanel) return
+                    sizeLevel = p
+                    sizing = Sizing(Sizing.MANUAL, p)
+                    sizeChanged(false)
+                }
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) { saveSizing() }
+            })
+        }
+        sizeValue = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            gravity = Gravity.END
+            minimumWidth = dp(36)
+        }
+        sliderRow.addView(sizeSeek)
+        sliderRow.addView(sizeValue)
+        sizePanel.addView(sliderRow)
+        root.addView(sizePanel)
+        updatePanel()
+    }
+
+    private fun chip(label: String, onClick: () -> Unit) = TextView(this).apply {
+        text = label
+        setTextColor(Color.WHITE)
+        textSize = 14f
+        gravity = Gravity.CENTER
+        setPadding(dp(14), dp(8), dp(14), dp(8))
+        layoutParams = LinearLayout.LayoutParams(0, -2, 1f).apply { rightMargin = dp(6) }
+        setOnClickListener { onClick() }
+    }
+
+    private fun chipBg(selected: Boolean) = GradientDrawable().apply {
+        setColor(Color.parseColor(if (selected) "#E94F8B" else "#3A3058"))
+        cornerRadius = dp(12).toFloat()
+    }
+
+    private fun updatePanel() {
+        updatingPanel = true
+        val isOriginal = sizing.mode == Sizing.ORIGINAL || (sizing.mode == Sizing.MANUAL && sizing.level == 0)
+        btnAuto.background = chipBg(sizing.mode == Sizing.AUTO)
+        btnOriginal.background = chipBg(isOriginal)
+        val shown = if (sizing.mode == Sizing.ORIGINAL) 0 else sizeLevel
+        sizeSeek.progress = shown
+        sizeSeek.alpha = if (sizing.mode == Sizing.AUTO) 0.5f else 1f
+        sizeValue.text = shown.toString()
+        updatingPanel = false
+    }
+
+    private fun sizeChanged(save: Boolean) {
+        updatePanel()
+        pushSizing()
+        if (save) saveSizing()
+    }
+
+    private fun saveSizing() {
+        prefs.edit().putInt("size_mode", sizing.mode).putInt("size_level", sizeLevel).apply()
+    }
+
+    /** Reaplica o ajuste nas páginas visíveis (só recalcula a matriz, sem recarregar imagem). */
+    private fun pushSizing() {
+        val a = adapter ?: return
+        a.sizing = sizing
+        a.insets = insets
+        val rv = pager.getChildAt(0) as? RecyclerView ?: return
+        for (i in 0 until rv.childCount) {
+            (rv.getChildAt(i) as? ZoomImageView)?.configure(sizing, insets[0], insets[1], insets[2], insets[3])
+        }
+    }
+
+    private fun toggleSizePanel() {
+        sizePanel.visibility = if (sizePanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
     }
 
     private fun textBtn(label: String, onClick: () -> Unit) = TextView(this).apply {
@@ -180,7 +324,11 @@ class ReaderActivity : AppCompatActivity() {
         }
         source = s
         val dm = resources.displayMetrics
-        pager.adapter = PageAdapter(s, io, ui, dm.widthPixels * 2, dm.heightPixels * 2) { handleTap(it) }
+        val a = PageAdapter(s, io, ui, dm.widthPixels * 2, dm.heightPixels * 2) { handleTap(it) }
+        a.sizing = sizing
+        a.insets = insets
+        adapter = a
+        pager.adapter = a
         seek.max = s.count - 1
         val start = startPage.coerceIn(0, s.count - 1)
         pager.setCurrentItem(start, false)
@@ -218,6 +366,7 @@ class ReaderActivity : AppCompatActivity() {
         val vis = if (overlayVisible) View.VISIBLE else View.GONE
         topBar.visibility = vis
         bottomBar.visibility = vis
+        if (!overlayVisible) sizePanel.visibility = View.GONE
     }
 
     private fun enterImmersive() {
@@ -247,6 +396,9 @@ class PageAdapter(
     private val onTap: (Float) -> Unit
 ) : RecyclerView.Adapter<PageAdapter.VH>() {
 
+    var sizing = Sizing(Sizing.ORIGINAL, 0)
+    var insets = intArrayOf(0, 0, 0, 0)
+
     class VH(val img: ZoomImageView) : RecyclerView.ViewHolder(img)
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
@@ -260,11 +412,16 @@ class PageAdapter(
 
     override fun onBindViewHolder(holder: VH, position: Int) {
         holder.img.setImageDrawable(null)
+        holder.img.configure(sizing, insets[0], insets[1], insets[2], insets[3])
         holder.img.tag = position
         io.execute {
-            val bmp = decode(position)
+            val r = decode(position)
             ui.post {
-                if (holder.img.tag == position && bmp != null) holder.img.setImageDrawable(android.graphics.drawable.BitmapDrawable(holder.img.resources, bmp))
+                if (holder.img.tag == position && r != null) {
+                    holder.img.sourceScale = r.second
+                    holder.img.configure(sizing, insets[0], insets[1], insets[2], insets[3])
+                    holder.img.setImageDrawable(android.graphics.drawable.BitmapDrawable(holder.img.resources, r.first))
+                }
             }
         }
     }
@@ -272,15 +429,18 @@ class PageAdapter(
     override fun onViewRecycled(holder: VH) {
         holder.img.tag = -1
         holder.img.setImageDrawable(null)
+        holder.img.sourceScale = 1
     }
 
-    private fun decode(i: Int): Bitmap? = try {
+    /** Devolve o bitmap e o fator de redução usado, para que "tamanho original" seja o do arquivo. */
+    private fun decode(i: Int): Pair<Bitmap, Int>? = try {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         src.open(i).use { BitmapFactory.decodeStream(it, null, bounds) }
         var sample = 1
         while (bounds.outWidth / (sample * 2) >= maxW && bounds.outHeight / (sample * 2) >= maxH) sample *= 2
         val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-        src.open(i).use { BitmapFactory.decodeStream(it, null, opts) }
+        val bmp = src.open(i).use { BitmapFactory.decodeStream(it, null, opts) }
+        if (bmp == null) null else bmp to sample
     } catch (e: Throwable) {
         null
     }

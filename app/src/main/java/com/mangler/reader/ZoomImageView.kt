@@ -8,6 +8,20 @@ import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
 import androidx.appcompat.widget.AppCompatImageView
+import kotlin.math.pow
+
+/**
+ * Ajuste de tamanho da página.
+ * AUTO: cabe inteira na área útil. ORIGINAL: 1 pixel da imagem = 1 pixel da tela.
+ * MANUAL: [level] de 0 a 100; 0 = original, 100 = cabe inteira (mesmo que AUTO), crescimento proporcional.
+ */
+class Sizing(val mode: Int, val level: Int) {
+    companion object {
+        const val AUTO = 0
+        const val ORIGINAL = 1
+        const val MANUAL = 2
+    }
+}
 
 /** Imagem com zoom (pinça e toque duplo), arrastar e toque simples. */
 class ZoomImageView @JvmOverloads constructor(
@@ -17,8 +31,18 @@ class ZoomImageView @JvmOverloads constructor(
 
     var onTap: ((Float) -> Unit)? = null
 
+    /** Quanto o bitmap foi reduzido na decodificação (inSampleSize); o tamanho original = bitmap * isto. */
+    var sourceScale = 1
+
+    private var sizing = Sizing(Sizing.ORIGINAL, 0)
+    private var insL = 0
+    private var insT = 0
+    private var insR = 0
+    private var insB = 0
+
     private val m by lazy { Matrix() }
     private val v by lazy { FloatArray(9) }
+    // Escala configurada (modo/controle). O zoom por pinça é sempre relativo a ela.
     private var baseScale = 1f
     private val maxMul = 6f
 
@@ -41,7 +65,7 @@ class ZoomImageView @JvmOverloads constructor(
             }
 
             override fun onScroll(e1: MotionEvent?, e2: MotionEvent, dx: Float, dy: Float): Boolean {
-                if (currentScale() > baseScale * 1.01f && !scaleDetector.isInProgress) {
+                if (canPan() && !scaleDetector.isInProgress) {
                     m.getValues(v)
                     val before = v[Matrix.MTRANS_X]
                     m.postTranslate(-dx, -dy)
@@ -66,6 +90,13 @@ class ZoomImageView @JvmOverloads constructor(
         scaleType = ScaleType.MATRIX
     }
 
+    /** Aplica modo/controle e a área útil (descontando recortes de tela). Só refaz a matriz: não recarrega a imagem. */
+    fun configure(s: Sizing, l: Int, t: Int, r: Int, b: Int) {
+        sizing = s
+        insL = l; insT = t; insR = r; insB = b
+        resetFit()
+    }
+
     override fun setImageDrawable(drawable: Drawable?) {
         super.setImageDrawable(drawable)
         resetFit()
@@ -81,27 +112,46 @@ class ZoomImageView @JvmOverloads constructor(
         gestureDetector.onTouchEvent(e)
         when (e.actionMasked) {
             MotionEvent.ACTION_DOWN, MotionEvent.ACTION_POINTER_DOWN ->
-                parent?.requestDisallowInterceptTouchEvent(
-                    e.pointerCount > 1 || currentScale() > baseScale * 1.01f
-                )
+                parent?.requestDisallowInterceptTouchEvent(e.pointerCount > 1 || canPan())
         }
         return true
     }
+
+    private fun areaW() = (width - insL - insR).coerceAtLeast(1).toFloat()
+    private fun areaH() = (height - insT - insB).coerceAtLeast(1).toFloat()
 
     private fun currentScale(): Float {
         m.getValues(v)
         return v[Matrix.MSCALE_X]
     }
 
+    /** A imagem (na escala atual) passa da área útil em alguma direção? */
+    private fun canPan(): Boolean {
+        val d = drawable ?: return false
+        val s = currentScale()
+        return d.intrinsicWidth * s > areaW() + 1f || d.intrinsicHeight * s > areaH() + 1f
+    }
+
     private fun resetFit() {
         val d = drawable ?: return
-        if (width == 0 || height == 0 || d.intrinsicWidth <= 0) return
+        if (width == 0 || height == 0 || d.intrinsicWidth <= 0 || d.intrinsicHeight <= 0) return
+        val aw = areaW()
+        val ah = areaH()
         val dw = d.intrinsicWidth.toFloat()
         val dh = d.intrinsicHeight.toFloat()
-        baseScale = minOf(width / dw, height / dh)
+        val src = sourceScale.coerceAtLeast(1).toFloat()
+        // pixels da tela por pixel do arquivo original
+        val fit = minOf(aw / (dw * src), ah / (dh * src))
+        val perOriginal = when (sizing.mode) {
+            Sizing.AUTO -> fit
+            Sizing.ORIGINAL -> 1f
+            else -> fit.toDouble().pow(sizing.level.coerceIn(0, 100) / 100.0).toFloat()
+        }
+        baseScale = perOriginal * src
         m.reset()
         m.postScale(baseScale, baseScale)
-        m.postTranslate((width - dw * baseScale) / 2f, (height - dh * baseScale) / 2f)
+        m.postTranslate(insL + (aw - dw * baseScale) / 2f, insT.toFloat())
+        clamp()
         imageMatrix = m
     }
 
@@ -120,10 +170,12 @@ class ZoomImageView @JvmOverloads constructor(
         val s = v[Matrix.MSCALE_X]
         val iw = d.intrinsicWidth * s
         val ih = d.intrinsicHeight * s
+        val aw = areaW()
+        val ah = areaH()
         val tx = v[Matrix.MTRANS_X]
         val ty = v[Matrix.MTRANS_Y]
-        val nx = if (iw <= width) (width - iw) / 2f else tx.coerceIn(width - iw, 0f)
-        val ny = if (ih <= height) (height - ih) / 2f else ty.coerceIn(height - ih, 0f)
+        val nx = if (iw <= aw) insL + (aw - iw) / 2f else tx.coerceIn(insL + aw - iw, insL.toFloat())
+        val ny = if (ih <= ah) insT + (ah - ih) / 2f else ty.coerceIn(insT + ah - ih, insT.toFloat())
         m.postTranslate(nx - tx, ny - ty)
     }
 }
