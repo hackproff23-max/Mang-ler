@@ -80,7 +80,7 @@ class MainActivity : AppCompatActivity() {
         root.addView(button("Abrir pasta de imagens", "#3B2F6B") { pickFolder.launch(null) })
 
         root.addView(TextView(this).apply {
-            text = "Toque no meio: menu · bordas: virar página\nPinça ou toque duplo: zoom\nNo navegador, o capítulo abre em tela cheia sozinho"
+            text = "Toque no meio: menu · bordas: virar página\nPinça ou toque duplo: zoom\nNo navegador, abra um capítulo e toque em \"Abrir\" para ler em tela cheia"
             setTextColor(Color.parseColor("#8A82A8"))
             textSize = 12f
             gravity = Gravity.CENTER

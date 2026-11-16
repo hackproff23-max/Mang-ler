@@ -6,15 +6,16 @@ import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.drawable.GradientDrawable
-import android.net.Uri
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.View
-import android.view.WindowManager
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
@@ -30,30 +31,32 @@ import android.widget.Toast
 import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.view.WindowCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
+import org.json.JSONArray
 import java.net.URLEncoder
+import java.util.UUID
 
 /**
- * Mini-navegador para ler mangá online.
- * Ao abrir um capítulo (URL de leitura), a barra some e a tela fica cheia (imersivo).
+ * Mini-navegador (busca pelo Google) para achar mangá online.
+ * Ao abrir um capítulo aparece um aviso: "Abrir em tela cheia" leva as páginas
+ * para o leitor, com efeito de virar página.
  */
 class BrowserActivity : AppCompatActivity() {
 
     private lateinit var prefs: SharedPreferences
     private lateinit var web: WebView
-    private lateinit var bar: LinearLayout
     private lateinit var urlBox: EditText
     private lateinit var progress: ProgressBar
-    private lateinit var exitFs: TextView
+    private lateinit var prompt: LinearLayout
     private lateinit var backBtn: TextView
     private lateinit var fwdBtn: TextView
 
-    private var fullscreen = false
-    private var autoFs: Boolean = true
+    private val ui = Handler(Looper.getMainLooper())
+    private val home = "https://www.google.com"
 
-    private val home = "https://mangadex.org"
+    private var suggest = true
+    private var extracting = false
+    private var token = ""
+    private var lastHandledUrl: String? = null
 
     // Heurística: URLs que parecem página de leitura de capítulo
     private val chapterRegex = Regex(
@@ -65,25 +68,18 @@ class BrowserActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("mangler", MODE_PRIVATE)
-        autoFs = prefs.getBoolean("browser_auto_fs", true)
+        suggest = prefs.getBoolean("browser_suggest", true)
 
         buildUi()
         configureWebView()
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                when {
-                    web.canGoBack() -> web.goBack()
-                    fullscreen -> setFullscreen(false)
-                    else -> finish()
-                }
+                if (web.canGoBack()) web.goBack() else finish()
             }
         })
 
-        val start = intent.getStringExtra("url")
-            ?: prefs.getString("browser_last_url", null)
-            ?: home
-        web.loadUrl(start)
+        web.loadUrl(intent.getStringExtra("url") ?: prefs.getString("browser_last_url", null) ?: home)
     }
 
     // ---------- UI ----------
@@ -96,7 +92,7 @@ class BrowserActivity : AppCompatActivity() {
             layoutParams = FrameLayout.LayoutParams(-1, -1)
         }
 
-        bar = LinearLayout(this).apply {
+        val bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
             setBackgroundColor(Color.parseColor("#1E1830"))
@@ -112,7 +108,7 @@ class BrowserActivity : AppCompatActivity() {
             textSize = 14f
             setTextColor(Color.WHITE)
             setHintTextColor(Color.parseColor("#8A82A8"))
-            hint = "Buscar ou digitar endereço"
+            hint = "Pesquisar no Google ou digitar endereço"
             imeOptions = EditorInfo.IME_ACTION_GO
             inputType = android.text.InputType.TYPE_TEXT_VARIATION_URI
             background = GradientDrawable().apply {
@@ -135,7 +131,7 @@ class BrowserActivity : AppCompatActivity() {
         }
         bar.addView(urlBox)
 
-        bar.addView(barBtn("⛶") { setFullscreen(true) })
+        bar.addView(barBtn("📖") { startReader() })
         bar.addView(barBtn("⋮") { showMenu(it) })
         column.addView(bar)
 
@@ -154,24 +150,48 @@ class BrowserActivity : AppCompatActivity() {
         column.addView(web)
         root.addView(column)
 
-        // Botão flutuante para sair da tela cheia
-        exitFs = TextView(this).apply {
-            text = "✕"
+        // Aviso flutuante: abrir o capítulo no leitor em tela cheia
+        prompt = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#F2241C3A"))
+                cornerRadius = dp(16).toFloat()
+            }
+            setPadding(dp(14), dp(8), dp(8), dp(8))
+            layoutParams = FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply {
+                leftMargin = dp(12); rightMargin = dp(12); bottomMargin = dp(20)
+            }
+            elevation = dp(8).toFloat()
+            visibility = View.GONE
+        }
+        prompt.addView(TextView(this).apply {
+            text = "Abrir em tela cheia com virar página?"
             setTextColor(Color.WHITE)
-            textSize = 16f
+            textSize = 14f
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+        })
+        prompt.addView(TextView(this).apply {
+            text = "Abrir"
+            setTextColor(Color.WHITE)
+            textSize = 14f
             gravity = Gravity.CENTER
             background = GradientDrawable().apply {
-                shape = GradientDrawable.OVAL
-                setColor(0x66000000)
+                setColor(Color.parseColor("#E94F8B"))
+                cornerRadius = dp(12).toFloat()
             }
-            layoutParams = FrameLayout.LayoutParams(dp(36), dp(36), Gravity.TOP or Gravity.END).apply {
-                topMargin = dp(10); rightMargin = dp(10)
-            }
-            alpha = 0.7f
-            visibility = View.GONE
-            setOnClickListener { setFullscreen(false) }
-        }
-        root.addView(exitFs)
+            setPadding(dp(16), dp(8), dp(16), dp(8))
+            setOnClickListener { startReader() }
+        })
+        prompt.addView(TextView(this).apply {
+            text = "✕"
+            setTextColor(Color.parseColor("#B8B0D0"))
+            textSize = 16f
+            gravity = Gravity.CENTER
+            setPadding(dp(14), dp(8), dp(14), dp(8))
+            setOnClickListener { prompt.visibility = View.GONE }
+        })
+        root.addView(prompt)
 
         setContentView(root)
     }
@@ -205,6 +225,7 @@ class BrowserActivity : AppCompatActivity() {
             setAcceptCookie(true)
             setAcceptThirdPartyCookies(web, true)
         }
+        web.addJavascriptInterface(Bridge(), "ManglerBridge")
 
         web.webChromeClient = object : WebChromeClient() {
             override fun onProgressChanged(view: WebView, newProgress: Int) {
@@ -218,7 +239,6 @@ class BrowserActivity : AppCompatActivity() {
                 val u = request.url
                 val scheme = u.scheme ?: return false
                 if (scheme == "http" || scheme == "https") return false
-                // Esquemas externos (intent://, market://, mailto: ...)
                 try {
                     startActivity(Intent(Intent.ACTION_VIEW, u))
                 } catch (_: Throwable) {
@@ -242,8 +262,6 @@ class BrowserActivity : AppCompatActivity() {
         }
     }
 
-    private var lastHandledUrl: String? = null
-
     private fun onUrlChanged(url: String) {
         if (!urlBox.hasFocus()) urlBox.setText(url)
         backBtn.alpha = if (web.canGoBack()) 1f else 0.35f
@@ -252,7 +270,8 @@ class BrowserActivity : AppCompatActivity() {
 
         if (url == lastHandledUrl) return
         lastHandledUrl = url
-        if (autoFs) setFullscreen(chapterRegex.containsMatchIn(url.lowercase()))
+        val isChapter = chapterRegex.containsMatchIn(url.lowercase())
+        prompt.visibility = if (suggest && isChapter) View.VISIBLE else View.GONE
     }
 
     private fun go(input: String) {
@@ -261,7 +280,7 @@ class BrowserActivity : AppCompatActivity() {
         val url = when {
             q.startsWith("http://") || q.startsWith("https://") -> q
             !q.contains(' ') && q.contains('.') -> "https://$q"
-            else -> "https://duckduckgo.com/?q=" + URLEncoder.encode(q, "UTF-8")
+            else -> "https://www.google.com/search?q=" + URLEncoder.encode(q, "UTF-8")
         }
         urlBox.clearFocus()
         (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager)
@@ -269,44 +288,119 @@ class BrowserActivity : AppCompatActivity() {
         web.loadUrl(url)
     }
 
-    // ---------- Tela cheia ----------
+    // ---------- Extrair páginas e abrir no leitor ----------
 
-    private fun setFullscreen(on: Boolean) {
-        fullscreen = on
-        bar.visibility = if (on) View.GONE else View.VISIBLE
-        exitFs.visibility = if (on) View.VISIBLE else View.GONE
-        if (on) window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-        else window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
-
-        WindowCompat.setDecorFitsSystemWindows(window, !on)
-        val c = WindowCompat.getInsetsController(window, window.decorView)
-        if (on) {
-            c.systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-            c.hide(WindowInsetsCompat.Type.systemBars())
-        } else {
-            c.show(WindowInsetsCompat.Type.systemBars())
+    private inner class Bridge {
+        @JavascriptInterface
+        fun onImages(t: String, json: String) {
+            runOnUiThread {
+                if (!extracting || t != token) return@runOnUiThread
+                extracting = false
+                val urls = ArrayList<String>()
+                try {
+                    val arr = JSONArray(json)
+                    for (i in 0 until arr.length()) {
+                        val u = arr.getString(i)
+                        if (u.startsWith("http://") || u.startsWith("https://")) urls.add(u)
+                    }
+                } catch (_: Throwable) {}
+                if (urls.isEmpty()) {
+                    Toast.makeText(
+                        this@BrowserActivity,
+                        "Não achei páginas aqui. Abra um capítulo e tente de novo.",
+                        Toast.LENGTH_LONG
+                    ).show()
+                    return@runOnUiThread
+                }
+                startActivity(
+                    Intent(this@BrowserActivity, ReaderActivity::class.java)
+                        .putExtra("urls", urls.toTypedArray())
+                        .putExtra("referer", web.url ?: home)
+                        .putExtra("ua", web.settings.userAgentString)
+                )
+            }
         }
     }
 
-    override fun onWindowFocusChanged(hasFocus: Boolean) {
-        super.onWindowFocusChanged(hasFocus)
-        if (hasFocus && fullscreen) {
-            WindowCompat.getInsetsController(window, window.decorView)
-                .hide(WindowInsetsCompat.Type.systemBars())
-        }
+    private fun startReader() {
+        if (extracting) return
+        extracting = true
+        token = UUID.randomUUID().toString()
+        prompt.visibility = View.GONE
+        Toast.makeText(this, "Carregando páginas do capítulo…", Toast.LENGTH_SHORT).show()
+
+        val t = token
+        ui.postDelayed({
+            if (extracting && token == t) {
+                extracting = false
+                Toast.makeText(this, "Demorou demais para carregar as páginas", Toast.LENGTH_LONG).show()
+            }
+        }, 30000)
+
+        web.evaluateJavascript(extractJs.replace("__TOKEN__", token), null)
     }
+
+    // Rola a página para forçar o carregamento das imagens (lazy load) e coleta as páginas
+    private val extractJs = """
+        (function(){
+          var TOKEN='__TOKEN__';
+          function abs(u){try{return new URL(u,location.href).href}catch(e){return ''}}
+          function pick(im){
+            var c=[im.currentSrc,im.src,im.getAttribute('data-src'),im.getAttribute('data-lazy-src'),im.getAttribute('data-original'),im.getAttribute('data-url')];
+            for(var i=0;i<c.length;i++){
+              var u=c[i];
+              if(u&&u.indexOf('data:')!==0&&u.indexOf('blob:')!==0){
+                var a=abs(u);
+                if(a.indexOf('http')===0) return a;
+              }
+            }
+            return '';
+          }
+          function collect(){
+            var imgs=document.images, items=[], maxW=0;
+            for(var i=0;i<imgs.length;i++){
+              var im=imgs[i], u=pick(im);
+              if(!u) continue;
+              var r=im.getBoundingClientRect();
+              var w=r.width||im.naturalWidth, h=r.height||im.naturalHeight;
+              if(w<200||h<200) continue;
+              items.push({u:u,w:w});
+              if(w>maxW) maxW=w;
+            }
+            var seen={}, out=[];
+            for(var j=0;j<items.length;j++){
+              if(items[j].w>=maxW*0.6 && !seen[items[j].u]){seen[items[j].u]=1;out.push(items[j].u);}
+            }
+            return out;
+          }
+          var steps=0, y=window.scrollY||0;
+          var timer=setInterval(function(){
+            steps++;
+            y+=Math.max(window.innerHeight*0.9,300);
+            window.scrollTo(0,y);
+            var H=Math.max(document.documentElement.scrollHeight, document.body?document.body.scrollHeight:0);
+            if(y>=H+200||steps>=60){
+              clearInterval(timer);
+              setTimeout(function(){
+                window.scrollTo(0,0);
+                ManglerBridge.onImages(TOKEN, JSON.stringify(collect()));
+              },800);
+            }
+          },250);
+        })();
+    """.trimIndent()
 
     // ---------- Menu e favoritos ----------
 
     private fun showMenu(anchor: View) {
         PopupMenu(this, anchor).apply {
-            menu.add(0, 1, 0, "Início")
+            menu.add(0, 1, 0, "Início (Google)")
             menu.add(0, 2, 1, "Recarregar")
             menu.add(0, 3, 2, "Favoritar esta página")
             menu.add(0, 4, 3, "Favoritos")
-            menu.add(0, 5, 4, "Tela cheia ao abrir capítulo").apply {
+            menu.add(0, 5, 4, "Sugerir tela cheia ao abrir capítulo").apply {
                 isCheckable = true
-                isChecked = autoFs
+                isChecked = suggest
             }
             setOnMenuItemClickListener { item ->
                 when (item.itemId) {
@@ -315,11 +409,12 @@ class BrowserActivity : AppCompatActivity() {
                     3 -> addFavorite()
                     4 -> showFavorites()
                     5 -> {
-                        autoFs = !autoFs
-                        prefs.edit().putBoolean("browser_auto_fs", autoFs).apply()
+                        suggest = !suggest
+                        prefs.edit().putBoolean("browser_suggest", suggest).apply()
+                        if (!suggest) prompt.visibility = View.GONE
                         Toast.makeText(
                             this@BrowserActivity,
-                            if (autoFs) "Tela cheia automática: ligada" else "Tela cheia automática: desligada",
+                            if (suggest) "Aviso de tela cheia: ligado" else "Aviso de tela cheia: desligado",
                             Toast.LENGTH_SHORT
                         ).show()
                     }
@@ -393,6 +488,8 @@ class BrowserActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        ui.removeCallbacksAndMessages(null)
+        web.removeJavascriptInterface("ManglerBridge")
         web.stopLoading()
         web.destroy()
         super.onDestroy()

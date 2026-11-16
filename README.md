@@ -6,5 +6,5 @@ Abre arquivos locais **CBZ / ZIP** e **pastas de imagens**. O APK assinado é ge
 
 ## Navegador (novo)
 
-O botão **Navegar e ler online** abre um mini-navegador (WebView) com barra de endereço, voltar/avançar, favoritos e busca.
-Ao abrir um capítulo (URL de leitura), a barra some e a tela fica **cheia** (modo imersivo). O botão ✕ no canto ou o voltar saem da tela cheia, e o botão ⛶ liga manualmente. Em ⋮ dá para desligar a tela cheia automática.
+O botão **Navegar e ler online** abre um mini-navegador (WebView) com busca pelo **Google**, barra de endereço, voltar/avançar e favoritos.
+Ao abrir um capítulo, aparece o aviso **"Abrir em tela cheia com virar página?"**. Em "Abrir", as páginas do capítulo vão para o leitor (tela cheia, efeito de folha virando, zoom). O botão 📖 da barra faz o mesmo em qualquer página, e em ⋮ dá para desligar o aviso.

@@ -43,6 +43,7 @@ class ReaderActivity : AppCompatActivity() {
     private var source: PageSource? = null
     private var rtl = true
     private var overlayVisible = false
+    private var webMode = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -58,14 +59,24 @@ class ReaderActivity : AppCompatActivity() {
         buildUi()
         enterImmersive()
 
-        val uri = Uri.parse(intent.getStringExtra("uri"))
+        // Capítulo vindo do navegador: lista de URLs de imagens
+        val webUrls = intent.getStringArrayExtra("urls")
+        webMode = webUrls != null
+        val referer = intent.getStringExtra("referer") ?: ""
+        val ua = intent.getStringExtra("ua") ?: "Mozilla/5.0"
+
+        val uri = if (webMode) null else Uri.parse(intent.getStringExtra("uri"))
         val folder = intent.getBooleanExtra("folder", false)
         val resume = intent.getBooleanExtra("resume", false)
 
         io.execute {
             try {
-                val s = if (folder) Sources.openFolder(this, uri) else Sources.openZip(this, uri)
-                ui.post { show(s, if (resume) prefs.getInt("page", 0) else 0) }
+                val s = when {
+                    webUrls != null -> WebSource(this, webUrls.toList(), referer, ua)
+                    folder -> Sources.openFolder(this, uri!!)
+                    else -> Sources.openZip(this, uri!!)
+                }
+                ui.post { show(s, if (resume && !webMode) prefs.getInt("page", 0) else 0) }
             } catch (e: Throwable) {
                 ui.post {
                     Toast.makeText(this, "Não consegui abrir: ${e.message}", Toast.LENGTH_LONG).show()
@@ -176,7 +187,8 @@ class ReaderActivity : AppCompatActivity() {
         pager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
             override fun onPageSelected(position: Int) {
                 updateLabel(position)
-                prefs.edit().putInt("page", position).apply()
+                // Só guarda a posição de arquivos locais; capítulo online não substitui o "Continuar lendo"
+                if (!webMode) prefs.edit().putInt("page", position).apply()
             }
         })
     }
