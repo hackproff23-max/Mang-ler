@@ -46,8 +46,13 @@ class ReaderActivity : AppCompatActivity() {
     private lateinit var sizePanel: LinearLayout
     private lateinit var btnAuto: TextView
     private lateinit var btnOriginal: TextView
+    private lateinit var btnFill: TextView
     private lateinit var sizeSeek: SeekBar
     private lateinit var sizeValue: TextView
+    private lateinit var stretchXSeek: SeekBar
+    private lateinit var stretchXValue: TextView
+    private lateinit var stretchYSeek: SeekBar
+    private lateinit var stretchYValue: TextView
     private var updatingPanel = false
 
     // Painel "Qualidade e carregamento de imagens"
@@ -77,15 +82,23 @@ class ReaderActivity : AppCompatActivity() {
     // Padrão: "Ajustar à tela" (largura inteira). Salvo entre páginas e entre aberturas do app.
     private var sizing = Sizing(Sizing.AUTO, 100)
     private var sizeLevel = 100
+    // Esticar largura/altura (%, 100 = normal), independentes e valendo em qualquer modo
+    private var stretchX = 100
+    private var stretchY = 100
     private var insets = intArrayOf(0, 0, 0, 0)
+
+    /** Monta o Sizing já com os valores atuais de esticar largura/altura. */
+    private fun mk(mode: Int, level: Int) = Sizing(mode, level, stretchX, stretchY)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("mangler", MODE_PRIVATE)
         rtl = prefs.getBoolean("rtl", true)
         sizeLevel = prefs.getInt("fit_level", 100).coerceIn(0, 100)
+        stretchX = prefs.getInt("stretch_x", 100).coerceIn(STRETCH_MIN, STRETCH_MAX)
+        stretchY = prefs.getInt("stretch_y", 100).coerceIn(STRETCH_MIN, STRETCH_MAX)
         settings = LoadSettings.load(prefs)
-        sizing = Sizing(prefs.getInt("fit_mode", Sizing.AUTO).coerceIn(0, 2), sizeLevel)
+        sizing = mk(prefs.getInt("fit_mode", Sizing.AUTO).coerceIn(0, 3), sizeLevel)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (Build.VERSION.SDK_INT >= 28) {
@@ -232,17 +245,37 @@ class ReaderActivity : AppCompatActivity() {
 
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         btnAuto = chip("Ajustar à tela") {
-            sizing = Sizing(Sizing.AUTO, sizeLevel)
+            sizing = mk(Sizing.AUTO, sizeLevel)
             sizeChanged(true)
         }
         btnOriginal = chip("Tamanho original") {
             sizeLevel = 0
-            sizing = Sizing(Sizing.ORIGINAL, 0)
+            sizing = mk(Sizing.ORIGINAL, 0)
             sizeChanged(true)
         }
         row.addView(btnAuto)
         row.addView(btnOriginal)
         sizePanel.addView(row)
+
+        // Preencher a tela inteira (estica largura e altura, sem cortar nada) e zerar o esticar
+        val row2 = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, dp(6), 0, 0)
+        }
+        btnFill = chip("Esticar p/ preencher") {
+            sizing = mk(Sizing.FILL, sizeLevel)
+            sizeChanged(true)
+        }
+        val btnResetStretch = chip("Zerar esticar") {
+            stretchX = 100
+            stretchY = 100
+            sizing = mk(sizing.mode, sizing.level)
+            sizeChanged(true)
+        }
+        btnResetStretch.background = chipBg(false)
+        row2.addView(btnFill)
+        row2.addView(btnResetStretch)
+        sizePanel.addView(row2)
 
         val sliderRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -257,7 +290,7 @@ class ReaderActivity : AppCompatActivity() {
                 override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
                     if (!fromUser || updatingPanel) return
                     sizeLevel = p
-                    sizing = Sizing(Sizing.MANUAL, p)
+                    sizing = mk(Sizing.MANUAL, p)
                     sizeChanged(false)
                 }
                 override fun onStartTrackingTouch(sb: SeekBar) {}
@@ -273,8 +306,68 @@ class ReaderActivity : AppCompatActivity() {
         sliderRow.addView(sizeSeek)
         sliderRow.addView(sizeValue)
         sizePanel.addView(sliderRow)
+
+        // Esticar largura e altura de forma independente (deforma a imagem, você escolhe o quanto)
+        val xr = stretchRow("Largura") { v ->
+            stretchX = v
+            sizing = mk(sizing.mode, sizing.level)
+            sizeChanged(false)
+        }
+        stretchXSeek = xr.second
+        stretchXValue = xr.third
+        sizePanel.addView(xr.first)
+
+        val yr = stretchRow("Altura") { v ->
+            stretchY = v
+            sizing = mk(sizing.mode, sizing.level)
+            sizeChanged(false)
+        }
+        stretchYSeek = yr.second
+        stretchYValue = yr.third
+        sizePanel.addView(yr.first)
+
+        sizePanel.addView(note("Largura e Altura esticam a imagem em cada direção (100% = normal). Pode deformar o desenho; use o que ficar melhor."))
+
         root.addView(sizePanel)
         updatePanel()
+    }
+
+    /** Linha com nome, barra (50% a 300%) e valor. Devolve a linha, a barra e o texto do valor. */
+    private fun stretchRow(label: String, onValue: (Int) -> Unit): Triple<LinearLayout, SeekBar, TextView> {
+        val r = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_LTR
+            setPadding(0, dp(6), 0, 0)
+        }
+        val name = TextView(this).apply {
+            text = label
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            minimumWidth = dp(64)
+        }
+        val value = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 14f
+            gravity = Gravity.END
+            minimumWidth = dp(48)
+        }
+        val bar = SeekBar(this).apply {
+            max = STRETCH_MAX - STRETCH_MIN
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
+                    if (!fromUser || updatingPanel) return
+                    onValue(p + STRETCH_MIN)
+                }
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) { saveSizing() }
+            })
+        }
+        r.addView(name)
+        r.addView(bar)
+        r.addView(value)
+        return Triple(r, bar, value)
     }
 
     private fun chip(label: String, onClick: () -> Unit) = TextView(this).apply {
@@ -297,10 +390,15 @@ class ReaderActivity : AppCompatActivity() {
         val isOriginal = sizing.mode == Sizing.ORIGINAL || (sizing.mode == Sizing.MANUAL && sizing.level == 0)
         btnAuto.background = chipBg(sizing.mode == Sizing.AUTO)
         btnOriginal.background = chipBg(isOriginal)
+        btnFill.background = chipBg(sizing.mode == Sizing.FILL)
         val shown = when (sizing.mode) { Sizing.ORIGINAL -> 0; Sizing.AUTO -> 100; else -> sizeLevel }
         sizeSeek.progress = shown
         sizeSeek.alpha = 1f
         sizeValue.text = shown.toString()
+        stretchXSeek.progress = stretchX - STRETCH_MIN
+        stretchXValue.text = "$stretchX%"
+        stretchYSeek.progress = stretchY - STRETCH_MIN
+        stretchYValue.text = "$stretchY%"
         updatingPanel = false
     }
 
@@ -311,7 +409,12 @@ class ReaderActivity : AppCompatActivity() {
     }
 
     private fun saveSizing() {
-        prefs.edit().putInt("fit_mode", sizing.mode).putInt("fit_level", sizeLevel).apply()
+        prefs.edit()
+            .putInt("fit_mode", sizing.mode)
+            .putInt("fit_level", sizeLevel)
+            .putInt("stretch_x", stretchX)
+            .putInt("stretch_y", stretchY)
+            .apply()
     }
 
     /** Reaplica o ajuste nas páginas visíveis (só recalcula a matriz, sem recarregar imagem). */
@@ -601,6 +704,12 @@ class ReaderActivity : AppCompatActivity() {
         io.shutdownNow()
         loader?.shutdown()
         try { source?.close() } catch (_: Throwable) {}
+    }
+
+    companion object {
+        // faixa dos controles de esticar largura/altura, em %
+        private const val STRETCH_MIN = 50
+        private const val STRETCH_MAX = 300
     }
 }
 

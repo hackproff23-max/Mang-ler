@@ -12,14 +12,24 @@ import kotlin.math.pow
 
 /**
  * Ajuste de tamanho da página.
- * AUTO: cabe inteira na área útil. ORIGINAL: 1 pixel da imagem = 1 pixel da tela.
- * MANUAL: [level] de 0 a 100; 0 = original, 100 = cabe inteira (mesmo que AUTO), crescimento proporcional.
+ * AUTO: cabe inteira na largura. ORIGINAL: 1 pixel da imagem = 1 pixel da tela.
+ * MANUAL: [level] de 0 a 100; 0 = original, 100 = cabe na largura (mesmo que AUTO), crescimento proporcional.
+ * FILL: estica a imagem para ocupar a área útil inteira (largura e altura), deformando se preciso.
+ *
+ * [stretchX] e [stretchY] (em %, 100 = normal) esticam a largura e a altura de forma independente,
+ * por cima de qualquer modo. Assim dá para escolher a deformação que ficar melhor.
  */
-class Sizing(val mode: Int, val level: Int) {
+class Sizing(
+    val mode: Int,
+    val level: Int,
+    val stretchX: Int = 100,
+    val stretchY: Int = 100
+) {
     companion object {
         const val AUTO = 0
         const val ORIGINAL = 1
         const val MANUAL = 2
+        const val FILL = 3
     }
 }
 
@@ -58,8 +68,10 @@ class ZoomImageView @JvmOverloads constructor(
 
     private val m by lazy { Matrix() }
     private val v by lazy { FloatArray(9) }
-    // Escala configurada (modo/controle). O zoom por pinça é sempre relativo a ela.
+    // Escala configurada (modo/controle) em X e em Y. O zoom por pinça é sempre relativo a elas
+    // e mantém a proporção entre as duas (o esticado escolhido não se perde ao dar zoom).
     private var baseScale = 1f
+    private var baseScaleY = 1f
     private val maxMul = 6f
 
     private val scaleDetector = ScaleGestureDetector(context,
@@ -81,9 +93,8 @@ class ZoomImageView @JvmOverloads constructor(
                 val d = drawable ?: return false
                 if (!canPan() || scaleDetector.isInProgress) return false
                 m.getValues(v)
-                val s = v[Matrix.MSCALE_X]
-                val iw = d.intrinsicWidth * s
-                val ih = d.intrinsicHeight * s
+                val iw = d.intrinsicWidth * v[Matrix.MSCALE_X]
+                val ih = d.intrinsicHeight * v[Matrix.MSCALE_Y]
                 val aw = areaW()
                 val ah = areaH()
                 val tx = v[Matrix.MTRANS_X].toInt()
@@ -150,6 +161,7 @@ class ZoomImageView @JvmOverloads constructor(
         val k = old.intrinsicWidth.toFloat() / d.intrinsicWidth
         m.preScale(k, k)
         baseScale *= k
+        baseScaleY *= k
         sourceScale = newSource
         super.setImageDrawable(d)
         clamp()
@@ -187,8 +199,9 @@ class ZoomImageView @JvmOverloads constructor(
     /** A imagem (na escala atual) passa da área útil em alguma direção? */
     private fun canPan(): Boolean {
         val d = drawable ?: return false
-        val s = currentScale()
-        return d.intrinsicWidth * s > areaW() + 1f || d.intrinsicHeight * s > areaH() + 1f
+        m.getValues(v)
+        return d.intrinsicWidth * v[Matrix.MSCALE_X] > areaW() + 1f ||
+            d.intrinsicHeight * v[Matrix.MSCALE_Y] > areaH() + 1f
     }
 
     private fun resetFit() {
@@ -199,17 +212,29 @@ class ZoomImageView @JvmOverloads constructor(
         val dw = d.intrinsicWidth.toFloat()
         val dh = d.intrinsicHeight.toFloat()
         val src = sourceScale.coerceAtLeast(0.01f)
-        // pixels da tela por pixel do arquivo original: ajuste pela LARGURA (nunca corta nas laterais;
-        // páginas compridas rolam na vertical)
-        val fit = aw / (dw * src)
-        val perOriginal = when (sizing.mode) {
-            Sizing.AUTO -> fit
-            Sizing.ORIGINAL -> 1f
-            else -> fit.toDouble().pow(sizing.level.coerceIn(0, 100) / 100.0).toFloat()
+
+        val sx: Float
+        val sy: Float
+        if (sizing.mode == Sizing.FILL) {
+            // estica independente em cada eixo: a imagem inteira ocupa a área útil, sem cortar nada
+            sx = aw / dw
+            sy = ah / dh
+        } else {
+            // pixels da tela por pixel do arquivo original: ajuste pela LARGURA
+            val fit = aw / (dw * src)
+            val perOriginal = when (sizing.mode) {
+                Sizing.AUTO -> fit
+                Sizing.ORIGINAL -> 1f
+                else -> fit.toDouble().pow(sizing.level.coerceIn(0, 100) / 100.0).toFloat()
+            }
+            sx = perOriginal * src
+            sy = sx
         }
-        baseScale = perOriginal * src
+        // controles de esticar largura/altura (100% = sem mudança)
+        baseScale = sx * (sizing.stretchX.coerceIn(10, 500) / 100f)
+        baseScaleY = sy * (sizing.stretchY.coerceIn(10, 500) / 100f)
         m.reset()
-        m.postScale(baseScale, baseScale)
+        m.postScale(baseScale, baseScaleY)
         m.postTranslate(insL + (aw - dw * baseScale) / 2f, insT.toFloat())
         clamp()
         imageMatrix = m
@@ -230,9 +255,8 @@ class ZoomImageView @JvmOverloads constructor(
     private fun clamp() {
         val d = drawable ?: return
         m.getValues(v)
-        val s = v[Matrix.MSCALE_X]
-        val iw = d.intrinsicWidth * s
-        val ih = d.intrinsicHeight * s
+        val iw = d.intrinsicWidth * v[Matrix.MSCALE_X]
+        val ih = d.intrinsicHeight * v[Matrix.MSCALE_Y]
         val aw = areaW()
         val ah = areaH()
         val tx = v[Matrix.MTRANS_X]
