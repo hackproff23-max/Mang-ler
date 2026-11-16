@@ -32,7 +32,10 @@ class ZoomImageView @JvmOverloads constructor(
     var onTap: ((Float) -> Unit)? = null
 
     /** Quanto o bitmap foi reduzido na decodificação (inSampleSize); o tamanho original = bitmap * isto. */
-    var sourceScale = 1
+    var sourceScale = 1f
+
+    /** Chamado quando o usuário amplia além da resolução do bitmap exibido (versão reduzida). */
+    var onNeedOriginal: (() -> Unit)? = null
 
     private var sizing = Sizing(Sizing.ORIGINAL, 0)
     private var insL = 0
@@ -97,6 +100,26 @@ class ZoomImageView @JvmOverloads constructor(
         resetFit()
     }
 
+    /**
+     * Troca a imagem por outra do mesmo conteúdo em resolução diferente, mantendo zoom e posição
+     * (sem passar por tela vazia).
+     */
+    fun swapDrawable(d: Drawable, newSource: Float) {
+        val old = drawable
+        if (old == null || old.intrinsicWidth <= 0 || d.intrinsicWidth <= 0) {
+            sourceScale = newSource
+            setImageDrawable(d)
+            return
+        }
+        val k = old.intrinsicWidth.toFloat() / d.intrinsicWidth
+        m.preScale(k, k)
+        baseScale *= k
+        sourceScale = newSource
+        super.setImageDrawable(d)
+        clamp()
+        imageMatrix = m
+    }
+
     override fun setImageDrawable(drawable: Drawable?) {
         super.setImageDrawable(drawable)
         resetFit()
@@ -139,7 +162,7 @@ class ZoomImageView @JvmOverloads constructor(
         val ah = areaH()
         val dw = d.intrinsicWidth.toFloat()
         val dh = d.intrinsicHeight.toFloat()
-        val src = sourceScale.coerceAtLeast(1).toFloat()
+        val src = sourceScale.coerceAtLeast(0.01f)
         // pixels da tela por pixel do arquivo original
         val fit = minOf(aw / (dw * src), ah / (dh * src))
         val perOriginal = when (sizing.mode) {
@@ -162,6 +185,8 @@ class ZoomImageView @JvmOverloads constructor(
         m.postScale(f, f, fx, fy)
         clamp()
         imageMatrix = m
+        val now = currentScale()
+        if (f > 1f && now > 1.05f && now > baseScale * 1.1f && sourceScale > 1.01f) onNeedOriginal?.invoke()
     }
 
     private fun clamp() {

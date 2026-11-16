@@ -13,10 +13,12 @@ import android.os.Looper
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.View.MeasureSpec
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
+import android.widget.ScrollView
 import android.widget.SeekBar
 import android.widget.TextView
 import android.widget.Toast
@@ -48,6 +50,22 @@ class ReaderActivity : AppCompatActivity() {
     private lateinit var sizeValue: TextView
     private var updatingPanel = false
 
+    // Painel "Qualidade e carregamento de imagens"
+    private lateinit var qualityPanel: View
+    private lateinit var btnOrigFirst: TextView
+    private lateinit var btnReducedFirst: TextView
+    private lateinit var modeDesc: TextView
+    private lateinit var reduceBox: LinearLayout
+    private lateinit var reduceSeek: SeekBar
+    private lateinit var reduceValue: TextView
+    private lateinit var btnPreload: TextView
+    private lateinit var preloadSeek: SeekBar
+    private lateinit var preloadLabel: TextView
+    private lateinit var btnOriginalNow: TextView
+    private lateinit var hdBadge: TextView
+    private var settings = LoadSettings()
+    private var loader: PageLoader? = null
+
     private val io: ExecutorService = Executors.newFixedThreadPool(2)
     private val ui = Handler(Looper.getMainLooper())
     private var source: PageSource? = null
@@ -66,6 +84,7 @@ class ReaderActivity : AppCompatActivity() {
         prefs = getSharedPreferences("mangler", MODE_PRIVATE)
         rtl = prefs.getBoolean("rtl", true)
         sizeLevel = prefs.getInt("size_level", 0).coerceIn(0, 100)
+        settings = LoadSettings.load(prefs)
         sizing = Sizing(prefs.getInt("size_mode", Sizing.ORIGINAL).coerceIn(0, 2), sizeLevel)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -139,6 +158,7 @@ class ReaderActivity : AppCompatActivity() {
         }
         topBar.addView(pageLabel)
         topBar.addView(textBtn("⤢") { toggleSizePanel() })
+        topBar.addView(textBtn("⚙") { toggleQualityPanel() })
         val dirBtn = textBtn(dirText()) {}
         dirBtn.setOnClickListener {
             rtl = !rtl
@@ -171,6 +191,17 @@ class ReaderActivity : AppCompatActivity() {
         root.addView(bottomBar)
 
         buildSizePanel(root)
+        buildQualityPanel(root)
+        hdBadge = TextView(this).apply {
+            text = "Carregando original…"
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            background = GradientDrawable().apply { setColor(0xB3000000.toInt()); cornerRadius = dp(12).toFloat() }
+            setPadding(dp(12), dp(5), dp(12), dp(5))
+            layoutParams = FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.CENTER_HORIZONTAL).apply { topMargin = dp(40) }
+            visibility = View.GONE
+        }
+        root.addView(hdBadge)
 
         // Área útil: desconta recortes de tela (e barras do sistema, se estiverem visíveis)
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, wi ->
@@ -294,7 +325,178 @@ class ReaderActivity : AppCompatActivity() {
         }
     }
 
+    // ---------- Qualidade e carregamento de imagens ----------
+
+    private fun buildQualityPanel(root: FrameLayout) {
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(14), dp(10), dp(14), dp(10))
+        }
+        box.addView(TextView(this).apply {
+            text = "Qualidade e carregamento de imagens"
+            setTextColor(Color.WHITE)
+            textSize = 15f
+            setTypeface(typeface, android.graphics.Typeface.BOLD)
+            setPadding(0, 0, 0, dp(8))
+        })
+        val modes = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        btnOrigFirst = chip("Original primeiro") { settings = settings.copy(reducedFirst = false); settingsChanged() }
+        btnReducedFirst = chip("Reduzida primeiro") { settings = settings.copy(reducedFirst = true); settingsChanged() }
+        modes.addView(btnOrigFirst)
+        modes.addView(btnReducedFirst)
+        box.addView(modes)
+        modeDesc = note("")
+        box.addView(modeDesc)
+
+        reduceBox = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+        val rr = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_LTR
+        }
+        rr.addView(TextView(this).apply { text = "Redução"; setTextColor(Color.WHITE); textSize = 14f })
+        reduceSeek = SeekBar(this).apply {
+            max = 100
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
+                    if (!fromUser || updatingPanel) return
+                    settings = settings.copy(reducePct = p)
+                    reduceValue.text = "$p%"
+                }
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) { settingsChanged() }
+            })
+        }
+        reduceValue = TextView(this).apply { setTextColor(Color.WHITE); textSize = 14f; gravity = Gravity.END; minimumWidth = dp(40) }
+        rr.addView(reduceSeek)
+        rr.addView(reduceValue)
+        reduceBox.addView(rr)
+        reduceBox.addView(note("0% = resolução original · 100% = redução máxima. Vale para as próximas páginas carregadas."))
+        box.addView(reduceBox)
+
+        val pr = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            layoutDirection = View.LAYOUT_DIRECTION_LTR
+            setPadding(0, dp(8), 0, 0)
+        }
+        btnPreload = chip("") { settings = settings.copy(preload = !settings.preload); settingsChanged() }
+        preloadSeek = SeekBar(this).apply {
+            max = 2
+            layoutParams = LinearLayout.LayoutParams(0, -2, 1f)
+            setOnSeekBarChangeListener(object : SeekBar.OnSeekBarChangeListener {
+                override fun onProgressChanged(sb: SeekBar, p: Int, fromUser: Boolean) {
+                    if (!fromUser || updatingPanel) return
+                    settings = settings.copy(preloadCount = p + 1)
+                    preloadLabel.text = "${p + 1} pág."
+                }
+                override fun onStartTrackingTouch(sb: SeekBar) {}
+                override fun onStopTrackingTouch(sb: SeekBar) { settingsChanged() }
+            })
+        }
+        preloadLabel = TextView(this).apply { setTextColor(Color.WHITE); textSize = 14f; gravity = Gravity.END; minimumWidth = dp(52) }
+        pr.addView(btnPreload)
+        pr.addView(preloadSeek)
+        pr.addView(preloadLabel)
+        box.addView(pr)
+        box.addView(note("Prepara as próximas páginas em segundo plano (menos em aparelhos com pouca memória)."))
+
+        btnOriginalNow = chip("") { adapter?.toggleOriginal(pager.currentItem) }.apply {
+            (layoutParams as LinearLayout.LayoutParams).apply { topMargin = dp(8); width = -1 }
+        }
+        box.addView(btnOriginalNow)
+
+        qualityPanel = MaxHeightScroll(this, (resources.displayMetrics.heightPixels * 0.6f).toInt()).apply {
+            background = GradientDrawable().apply {
+                setColor(Color.parseColor("#F2241C3A"))
+                cornerRadius = dp(16).toFloat()
+            }
+            elevation = dp(8).toFloat()
+            isClickable = true
+            layoutParams = FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM).apply {
+                leftMargin = dp(12); rightMargin = dp(12); bottomMargin = dp(84)
+            }
+            visibility = View.GONE
+            addView(box)
+        }
+        root.addView(qualityPanel)
+        updateQualityPanel()
+    }
+
+    private fun note(s: String) = TextView(this).apply {
+        text = s
+        setTextColor(Color.parseColor("#B8B0D0"))
+        textSize = 12f
+        setPadding(0, dp(4), 0, 0)
+    }
+
+    private fun updateQualityPanel() {
+        updatingPanel = true
+        btnOrigFirst.background = chipBg(!settings.reducedFirst)
+        btnReducedFirst.background = chipBg(settings.reducedFirst)
+        modeDesc.text = if (settings.reducedFirst)
+            "Mostra uma versão menor primeiro: mais rápido e usa menos memória. A original só é carregada ao ampliar ou pelo botão abaixo."
+        else
+            "Carrega a página direto na qualidade máxima. Usa mais memória e pode demorar mais."
+        reduceBox.visibility = if (settings.reducedFirst) View.VISIBLE else View.GONE
+        reduceSeek.progress = settings.reducePct
+        reduceValue.text = "${settings.reducePct}%"
+        btnPreload.text = if (settings.preload) "Pré-carregar: sim" else "Pré-carregar: não"
+        btnPreload.background = chipBg(settings.preload)
+        preloadSeek.progress = settings.preloadCount - 1
+        preloadSeek.isEnabled = settings.preload
+        preloadSeek.alpha = if (settings.preload) 1f else 0.4f
+        preloadLabel.text = "${settings.preloadCount} pág."
+        updatingPanel = false
+        updateOriginalButton()
+    }
+
+    private fun updateOriginalButton() {
+        val a = adapter
+        val pos = pager.currentItem
+        when {
+            !settings.reducedFirst -> {
+                btnOriginalNow.text = "Esta página já está em qualidade original"
+                btnOriginalNow.alpha = 0.5f
+            }
+            a != null && a.isLoadingOriginal(pos) -> {
+                btnOriginalNow.text = "Carregando original…"
+                btnOriginalNow.alpha = 0.5f
+            }
+            a != null && a.isOriginal(pos) -> {
+                btnOriginalNow.text = "Voltar à versão reduzida"
+                btnOriginalNow.alpha = 1f
+            }
+            else -> {
+                btnOriginalNow.text = "Carregar original desta página"
+                btnOriginalNow.alpha = 1f
+            }
+        }
+        btnOriginalNow.background = chipBg(false)
+    }
+
+    private fun settingsChanged() {
+        settings.save(prefs)
+        adapter?.settings = settings
+        updateQualityPanel()
+        // vale para as próximas páginas; refaz o pré-carregamento com a nova configuração
+        loader?.preload(settings, pager.currentItem)
+    }
+
+    private fun onOriginalState(pos: Int, loading: Boolean) {
+        if (pos == pager.currentItem) hdBadge.visibility = if (loading) View.VISIBLE else View.GONE
+        updateOriginalButton()
+    }
+
+    private fun toggleQualityPanel() {
+        sizePanel.visibility = View.GONE
+        if (qualityPanel.visibility == View.VISIBLE) qualityPanel.visibility = View.GONE
+        else { updateQualityPanel(); qualityPanel.visibility = View.VISIBLE }
+    }
+
     private fun toggleSizePanel() {
+        qualityPanel.visibility = View.GONE
         sizePanel.visibility = if (sizePanel.visibility == View.VISIBLE) View.GONE else View.VISIBLE
     }
 
@@ -323,19 +525,28 @@ class ReaderActivity : AppCompatActivity() {
             return
         }
         source = s
-        val dm = resources.displayMetrics
-        val a = PageAdapter(s, io, ui, dm.widthPixels * 2, dm.heightPixels * 2) { handleTap(it) }
+        val l = PageLoader(this, s, ui)
+        loader = l
+        val a = PageAdapter(s, l, { handleTap(it) }) { pos, loading -> onOriginalState(pos, loading) }
         a.sizing = sizing
         a.insets = insets
+        a.settings = settings
         adapter = a
         pager.adapter = a
         seek.max = s.count - 1
         val start = startPage.coerceIn(0, s.count - 1)
+        l.current = start
         pager.setCurrentItem(start, false)
+        l.preload(settings, start)
         updateLabel(start)
         pager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
             override fun onPageSelected(position: Int) {
                 updateLabel(position)
+                // página atual passa a ter prioridade; tarefas de páginas fora da janela são descartadas
+                loader?.current = position
+                loader?.preload(settings, position)
+                hdBadge.visibility = if (adapter?.isLoadingOriginal(position) == true) View.VISIBLE else View.GONE
+                updateOriginalButton()
                 // Só guarda a posição de arquivos locais; capítulo online não substitui o "Continuar lendo"
                 if (!webMode) prefs.edit().putInt("page", position).apply()
             }
@@ -366,7 +577,7 @@ class ReaderActivity : AppCompatActivity() {
         val vis = if (overlayVisible) View.VISIBLE else View.GONE
         topBar.visibility = vis
         bottomBar.visibility = vis
-        if (!overlayVisible) sizePanel.visibility = View.GONE
+        if (!overlayVisible) { sizePanel.visibility = View.GONE; qualityPanel.visibility = View.GONE }
     }
 
     private fun enterImmersive() {
@@ -380,26 +591,46 @@ class ReaderActivity : AppCompatActivity() {
         if (hasFocus) enterImmersive()
     }
 
+    override fun onLowMemory() {
+        super.onLowMemory()
+        loader?.trim()
+    }
+
     override fun onDestroy() {
         super.onDestroy()
         io.shutdownNow()
+        loader?.shutdown()
         try { source?.close() } catch (_: Throwable) {}
+    }
+}
+
+/** ScrollView com altura máxima (o painel de qualidade rola em telas pequenas). */
+class MaxHeightScroll(ctx: android.content.Context, private val maxH: Int) : ScrollView(ctx) {
+    override fun onMeasure(w: Int, h: Int) {
+        super.onMeasure(w, MeasureSpec.makeMeasureSpec(maxH, MeasureSpec.AT_MOST))
     }
 }
 
 class PageAdapter(
     private val src: PageSource,
-    private val io: ExecutorService,
-    private val ui: Handler,
-    private val maxW: Int,
-    private val maxH: Int,
-    private val onTap: (Float) -> Unit
+    private val loader: PageLoader,
+    private val onTap: (Float) -> Unit,
+    private val onOriginalState: (Int, Boolean) -> Unit
 ) : RecyclerView.Adapter<PageAdapter.VH>() {
 
     var sizing = Sizing(Sizing.ORIGINAL, 0)
     var insets = intArrayOf(0, 0, 0, 0)
+    var settings = LoadSettings()
+
+    // páginas em que a original foi pedida (zoom ou botão) e as que ainda estão carregando
+    private val originalPages = HashSet<Int>()
+    private val loadingOriginal = HashSet<Int>()
+    private val bound = HashMap<Int, VH>()
 
     class VH(val img: ZoomImageView) : RecyclerView.ViewHolder(img)
+
+    fun isOriginal(pos: Int) = !settings.reducedFirst || pos in originalPages
+    fun isLoadingOriginal(pos: Int) = pos in loadingOriginal
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
         val v = ZoomImageView(parent.context)
@@ -412,36 +643,78 @@ class PageAdapter(
 
     override fun onBindViewHolder(holder: VH, position: Int) {
         holder.img.setImageDrawable(null)
+        holder.img.sourceScale = 1f
         holder.img.configure(sizing, insets[0], insets[1], insets[2], insets[3])
         holder.img.tag = position
-        io.execute {
-            val r = decode(position)
-            ui.post {
-                if (holder.img.tag == position && r != null) {
-                    holder.img.sourceScale = r.second
-                    holder.img.configure(sizing, insets[0], insets[1], insets[2], insets[3])
-                    holder.img.setImageDrawable(android.graphics.drawable.BitmapDrawable(holder.img.resources, r.first))
-                }
-            }
-        }
+        bound[position] = holder
+        holder.img.onNeedOriginal = { if (!isOriginal(position)) requestOriginal(position) }
+
+        val pct = if (isOriginal(position)) 0 else settings.reducePct
+        loader.request(position, pct, object : PageLoader.Cb {
+            override fun active() = holder.img.tag == position
+            override fun onLoaded(l: Loaded) = show(holder, l)
+            override fun onError() {}
+        })
     }
 
     override fun onViewRecycled(holder: VH) {
+        val pos = holder.img.tag as? Int
         holder.img.tag = -1
         holder.img.setImageDrawable(null)
-        holder.img.sourceScale = 1
+        holder.img.sourceScale = 1f
+        if (pos != null && pos >= 0) {
+            if (bound[pos] === holder) bound.remove(pos)
+            if (loadingOriginal.remove(pos)) onOriginalState(pos, false)
+        }
     }
 
-    /** Devolve o bitmap e o fator de redução usado, para que "tamanho original" seja o do arquivo. */
-    private fun decode(i: Int): Pair<Bitmap, Int>? = try {
-        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-        src.open(i).use { BitmapFactory.decodeStream(it, null, bounds) }
-        var sample = 1
-        while (bounds.outWidth / (sample * 2) >= maxW && bounds.outHeight / (sample * 2) >= maxH) sample *= 2
-        val opts = BitmapFactory.Options().apply { inSampleSize = sample }
-        val bmp = src.open(i).use { BitmapFactory.decodeStream(it, null, opts) }
-        if (bmp == null) null else bmp to sample
-    } catch (e: Throwable) {
-        null
+    /** Mostra a página; se já havia uma versão, troca mantendo zoom e posição. */
+    private fun show(holder: VH, l: Loaded) {
+        val d = android.graphics.drawable.BitmapDrawable(holder.img.resources, l.bmp)
+        if (holder.img.drawable != null) {
+            holder.img.swapDrawable(d, l.sourceScale)
+        } else {
+            holder.img.sourceScale = l.sourceScale
+            holder.img.configure(sizing, insets[0], insets[1], insets[2], insets[3])
+            holder.img.setImageDrawable(d)
+        }
+    }
+
+    /** Pede a qualidade original da página (por zoom ou pelo botão). Não baixa nada antes disso. */
+    fun requestOriginal(pos: Int) {
+        if (pos in originalPages) return
+        originalPages.add(pos)
+        val holder = bound[pos] ?: return
+        loadingOriginal.add(pos)
+        onOriginalState(pos, true)
+        loader.request(pos, 0, object : PageLoader.Cb {
+            override fun active() = holder.img.tag == pos
+            override fun onLoaded(l: Loaded) {
+                loadingOriginal.remove(pos)
+                show(holder, l)
+                onOriginalState(pos, false)
+            }
+            override fun onError() {
+                loadingOriginal.remove(pos)
+                originalPages.remove(pos)
+                onOriginalState(pos, false)
+            }
+        })
+    }
+
+    /** Botão do painel: carrega a original ou volta à reduzida (sem baixar de novo). */
+    fun toggleOriginal(pos: Int) {
+        if (!settings.reducedFirst || pos in loadingOriginal) return
+        if (pos in originalPages) {
+            originalPages.remove(pos)
+            val holder = bound[pos] ?: return
+            loader.request(pos, settings.reducePct, object : PageLoader.Cb {
+                override fun active() = holder.img.tag == pos
+                override fun onLoaded(l: Loaded) { show(holder, l); onOriginalState(pos, false) }
+                override fun onError() {}
+            })
+        } else {
+            requestOriginal(pos)
+        }
     }
 }
