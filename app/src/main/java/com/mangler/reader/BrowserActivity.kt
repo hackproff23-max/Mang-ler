@@ -32,6 +32,7 @@ import androidx.activity.OnBackPressedCallback
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import org.json.JSONArray
+import org.json.JSONTokener
 import java.net.URLEncoder
 import java.util.UUID
 
@@ -57,6 +58,12 @@ class BrowserActivity : AppCompatActivity() {
     private var extracting = false
     private var token = ""
     private var lastHandledUrl: String? = null
+
+    // Importação de galerias com paginação numérica
+    private var importer: GalleryImporter? = null
+    private var importDialog: ImportProgressDialog? = null
+    private var importId = 0
+    private var probing = false
 
     // Heurística: URLs que parecem página de leitura de capítulo
     private val chapterRegex = Regex(
@@ -322,7 +329,106 @@ class BrowserActivity : AppCompatActivity() {
         }
     }
 
+    /**
+     * Botão de leitura: primeiro tenta o mecanismo de galeria (miniaturas + paginação numérica),
+     * usando o HTML da página aberta. Se não for galeria, cai no extrator de capítulo.
+     */
     private fun startReader() {
+        if (extracting || importer != null || probing) return
+        val pageUrl = web.url ?: return
+        prompt.visibility = View.GONE
+        probing = true
+        web.evaluateJavascript("(function(){return document.documentElement.outerHTML;})()") { res ->
+            probing = false
+            val html = decodeJsString(res)
+            if (html.isNullOrEmpty()) startJsExtraction() else startGallery(pageUrl, html)
+        }
+    }
+
+    private fun decodeJsString(res: String?): String? {
+        if (res == null || res == "null") return null
+        return try { JSONTokener(res).nextValue() as? String } catch (_: Throwable) { null }
+    }
+
+    private fun startGallery(pageUrl: String, html: String) {
+        val id = ++importId
+        val ua = web.settings.userAgentString
+        fun alive() = id == importId && importer != null && !isFinishing && !isDestroyed
+
+        val imp = GalleryImporter(ua, object : GalleryImporter.Listener {
+            override fun onStatus(s: GalleryImporter.Status) {
+                ui.post {
+                    if (!alive()) return@post
+                    if (importDialog == null) {
+                        importDialog = ImportProgressDialog(this@BrowserActivity) { cancelImport() }
+                        importDialog?.show()
+                    }
+                    importDialog?.update(s)
+                }
+            }
+
+            override fun onDone(r: GalleryImporter.ImportResult) {
+                ui.post {
+                    if (!alive()) return@post
+                    finishImport()
+                    val expected = r.expected
+                    if (r.failedImages > 0 || r.failedPages.isNotEmpty() || (expected != null && r.urls.size < expected)) {
+                        val msg = buildString {
+                            append("Importadas ${r.urls.size}")
+                            if (expected != null) append(" de $expected")
+                            append(" imagens")
+                            if (r.failedImages > 0) append(" · ${r.failedImages} falharam")
+                            if (r.failedPages.isNotEmpty()) append(" · páginas ${r.failedPages.joinToString()} indisponíveis")
+                        }
+                        Toast.makeText(this@BrowserActivity, msg, Toast.LENGTH_LONG).show()
+                    }
+                    startActivity(
+                        Intent(this@BrowserActivity, ReaderActivity::class.java)
+                            .putExtra("urls", r.urls.toTypedArray())
+                            .putExtra("referers", r.referers.toTypedArray())
+                            .putExtra("referer", pageUrl)
+                            .putExtra("ua", ua)
+                    )
+                }
+            }
+
+            override fun onFailed(message: String) {
+                ui.post {
+                    if (!alive()) return@post
+                    finishImport()
+                    AlertDialog.Builder(this@BrowserActivity)
+                        .setTitle("Não consegui importar a galeria")
+                        .setMessage(message)
+                        .setPositiveButton("OK", null)
+                        .show()
+                }
+            }
+
+            override fun onNotGallery() {
+                ui.post {
+                    if (!alive()) return@post
+                    finishImport()
+                    startJsExtraction()
+                }
+            }
+        })
+        importer = imp
+        imp.start(pageUrl, html)
+    }
+
+    private fun cancelImport() {
+        importer?.cancel()
+        finishImport()
+        Toast.makeText(this, "Importação cancelada", Toast.LENGTH_SHORT).show()
+    }
+
+    private fun finishImport() {
+        importDialog?.dismiss()
+        importDialog = null
+        importer = null
+    }
+
+    private fun startJsExtraction() {
         if (extracting) return
         extracting = true
         token = UUID.randomUUID().toString()
@@ -488,6 +594,9 @@ class BrowserActivity : AppCompatActivity() {
     }
 
     override fun onDestroy() {
+        importer?.cancel()
+        importer = null
+        importDialog?.dismiss()
         ui.removeCallbacksAndMessages(null)
         web.removeJavascriptInterface("ManglerBridge")
         web.stopLoading()

@@ -64,6 +64,7 @@ class ReaderActivity : AppCompatActivity() {
         webMode = webUrls != null
         val referer = intent.getStringExtra("referer") ?: ""
         val ua = intent.getStringExtra("ua") ?: "Mozilla/5.0"
+        val referers = intent.getStringArrayExtra("referers")?.toList()
 
         val uri = if (webMode) null else Uri.parse(intent.getStringExtra("uri"))
         val folder = intent.getBooleanExtra("folder", false)
@@ -72,7 +73,7 @@ class ReaderActivity : AppCompatActivity() {
         io.execute {
             try {
                 val s = when {
-                    webUrls != null -> WebSource(this, webUrls.toList(), referer, ua)
+                    webUrls != null -> WebSource(this, webUrls.toList(), referer, ua, referers)
                     folder -> Sources.openFolder(this, uri!!)
                     else -> Sources.openZip(this, uri!!)
                 }

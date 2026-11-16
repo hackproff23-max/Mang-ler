@@ -43,4 +43,5 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.0")
     implementation("androidx.viewpager2:viewpager2:1.1.0")
     implementation("androidx.documentfile:documentfile:1.0.1")
+    implementation("org.jsoup:jsoup:1.17.2")
 }
