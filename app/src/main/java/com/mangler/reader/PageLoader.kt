@@ -53,7 +53,7 @@ class Loaded(val bmp: Bitmap, val origW: Int, val original: Boolean) {
  * e com cache em memória que separa versão reduzida (por percentual) e original.
  * Os arquivos de origem nunca são alterados.
  */
-class PageLoader(ctx: Context, private val src: PageSource, private val ui: Handler) {
+class PageLoader(private val ctx: Context, private val src: PageSource, private val ui: Handler) {
 
     interface Cb {
         fun onLoaded(l: Loaded)
@@ -206,8 +206,11 @@ class PageLoader(ctx: Context, private val src: PageSource, private val ui: Hand
 
         // Reduzida: 0% = original, 100% = 25% das dimensões. Proporção preservada.
         val s = 1f - 0.75f * pct / 100f
-        var tw = (ow * s).roundToInt().coerceAtLeast(1)
-        var th = (oh * s).roundToInt().coerceAtLeast(1)
+        // piso: nunca abaixo da largura da tela, para o ajuste à largura não ampliar uma imagem borrada
+        val floor = minOf(ow, ctx.resources.displayMetrics.widthPixels).toFloat() / ow
+        val s2 = maxOf(s, floor)
+        var tw = (ow * s2).roundToInt().coerceAtLeast(1)
+        var th = (oh * s2).roundToInt().coerceAtLeast(1)
         if (tw.toLong() * th > pixelBudget) {
             val f = sqrt(pixelBudget.toDouble() / (tw.toLong() * th)).toFloat()
             tw = (tw * f).roundToInt().coerceAtLeast(1)

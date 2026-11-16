@@ -43,6 +43,19 @@ class ZoomImageView @JvmOverloads constructor(
     private var insR = 0
     private var insB = 0
 
+    private val scroller = android.widget.OverScroller(context)
+    private val flingStep = object : Runnable {
+        override fun run() {
+            if (scroller.computeScrollOffset()) {
+                m.getValues(v)
+                m.postTranslate(scroller.currX - v[Matrix.MTRANS_X], scroller.currY - v[Matrix.MTRANS_Y])
+                clamp()
+                imageMatrix = m
+                postOnAnimation(this)
+            }
+        }
+    }
+
     private val m by lazy { Matrix() }
     private val v by lazy { FloatArray(9) }
     // Escala configurada (modo/controle). O zoom por pinça é sempre relativo a ela.
@@ -59,7 +72,30 @@ class ZoomImageView @JvmOverloads constructor(
 
     private val gestureDetector = GestureDetector(context,
         object : GestureDetector.SimpleOnGestureListener() {
-            override fun onDown(e: MotionEvent): Boolean = true
+            override fun onDown(e: MotionEvent): Boolean {
+                scroller.forceFinished(true)
+                return true
+            }
+
+            override fun onFling(e1: MotionEvent?, e2: MotionEvent, vx: Float, vy: Float): Boolean {
+                val d = drawable ?: return false
+                if (!canPan() || scaleDetector.isInProgress) return false
+                m.getValues(v)
+                val s = v[Matrix.MSCALE_X]
+                val iw = d.intrinsicWidth * s
+                val ih = d.intrinsicHeight * s
+                val aw = areaW()
+                val ah = areaH()
+                val tx = v[Matrix.MTRANS_X].toInt()
+                val ty = v[Matrix.MTRANS_Y].toInt()
+                val minX = if (iw > aw) (insL + aw - iw).toInt() else tx
+                val maxX = if (iw > aw) insL else tx
+                val minY = if (ih > ah) (insT + ah - ih).toInt() else ty
+                val maxY = if (ih > ah) insT else ty
+                scroller.fling(tx, ty, vx.toInt(), vy.toInt(), minX, maxX, minY, maxY)
+                postOnAnimation(flingStep)
+                return true
+            }
 
             override fun onDoubleTap(e: MotionEvent): Boolean {
                 if (currentScale() > baseScale * 1.05f) resetFit()
@@ -76,7 +112,7 @@ class ZoomImageView @JvmOverloads constructor(
                     imageMatrix = m
                     m.getValues(v)
                     // Chegou na borda lateral: deixa o ViewPager virar a página.
-                    if (kotlin.math.abs(v[Matrix.MTRANS_X] - before) < 0.5f && dx != 0f) {
+                    if (kotlin.math.abs(v[Matrix.MTRANS_X] - before) < 0.5f && kotlin.math.abs(dx) > kotlin.math.abs(dy)) {
                         parent?.requestDisallowInterceptTouchEvent(false)
                     }
                 }
@@ -163,8 +199,9 @@ class ZoomImageView @JvmOverloads constructor(
         val dw = d.intrinsicWidth.toFloat()
         val dh = d.intrinsicHeight.toFloat()
         val src = sourceScale.coerceAtLeast(0.01f)
-        // pixels da tela por pixel do arquivo original
-        val fit = minOf(aw / (dw * src), ah / (dh * src))
+        // pixels da tela por pixel do arquivo original: ajuste pela LARGURA (nunca corta nas laterais;
+        // páginas compridas rolam na vertical)
+        val fit = aw / (dw * src)
         val perOriginal = when (sizing.mode) {
             Sizing.AUTO -> fit
             Sizing.ORIGINAL -> 1f
@@ -179,6 +216,7 @@ class ZoomImageView @JvmOverloads constructor(
     }
 
     private fun zoomBy(factor: Float, fx: Float, fy: Float) {
+        scroller.forceFinished(true)
         val cur = currentScale()
         val target = (cur * factor).coerceIn(baseScale, baseScale * maxMul)
         val f = target / cur

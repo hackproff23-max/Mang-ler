@@ -74,18 +74,18 @@ class ReaderActivity : AppCompatActivity() {
     private var overlayVisible = false
     private var webMode = false
 
-    // Padrão: 0 (tamanho original). Salvo entre páginas e entre aberturas do app.
-    private var sizing = Sizing(Sizing.ORIGINAL, 0)
-    private var sizeLevel = 0
+    // Padrão: "Ajustar à tela" (largura inteira). Salvo entre páginas e entre aberturas do app.
+    private var sizing = Sizing(Sizing.AUTO, 100)
+    private var sizeLevel = 100
     private var insets = intArrayOf(0, 0, 0, 0)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         prefs = getSharedPreferences("mangler", MODE_PRIVATE)
         rtl = prefs.getBoolean("rtl", true)
-        sizeLevel = prefs.getInt("size_level", 0).coerceIn(0, 100)
+        sizeLevel = prefs.getInt("fit_level", 100).coerceIn(0, 100)
         settings = LoadSettings.load(prefs)
-        sizing = Sizing(prefs.getInt("size_mode", Sizing.ORIGINAL).coerceIn(0, 2), sizeLevel)
+        sizing = Sizing(prefs.getInt("fit_mode", Sizing.AUTO).coerceIn(0, 2), sizeLevel)
 
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         if (Build.VERSION.SDK_INT >= 28) {
@@ -231,7 +231,7 @@ class ReaderActivity : AppCompatActivity() {
         }
 
         val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        btnAuto = chip("Automático") {
+        btnAuto = chip("Ajustar à tela") {
             sizing = Sizing(Sizing.AUTO, sizeLevel)
             sizeChanged(true)
         }
@@ -297,9 +297,9 @@ class ReaderActivity : AppCompatActivity() {
         val isOriginal = sizing.mode == Sizing.ORIGINAL || (sizing.mode == Sizing.MANUAL && sizing.level == 0)
         btnAuto.background = chipBg(sizing.mode == Sizing.AUTO)
         btnOriginal.background = chipBg(isOriginal)
-        val shown = if (sizing.mode == Sizing.ORIGINAL) 0 else sizeLevel
+        val shown = when (sizing.mode) { Sizing.ORIGINAL -> 0; Sizing.AUTO -> 100; else -> sizeLevel }
         sizeSeek.progress = shown
-        sizeSeek.alpha = if (sizing.mode == Sizing.AUTO) 0.5f else 1f
+        sizeSeek.alpha = 1f
         sizeValue.text = shown.toString()
         updatingPanel = false
     }
@@ -311,7 +311,7 @@ class ReaderActivity : AppCompatActivity() {
     }
 
     private fun saveSizing() {
-        prefs.edit().putInt("size_mode", sizing.mode).putInt("size_level", sizeLevel).apply()
+        prefs.edit().putInt("fit_mode", sizing.mode).putInt("fit_level", sizeLevel).apply()
     }
 
     /** Reaplica o ajuste nas páginas visíveis (só recalcula a matriz, sem recarregar imagem). */
@@ -618,7 +618,7 @@ class PageAdapter(
     private val onOriginalState: (Int, Boolean) -> Unit
 ) : RecyclerView.Adapter<PageAdapter.VH>() {
 
-    var sizing = Sizing(Sizing.ORIGINAL, 0)
+    var sizing = Sizing(Sizing.AUTO, 100)
     var insets = intArrayOf(0, 0, 0, 0)
     var settings = LoadSettings()
 
