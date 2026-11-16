@@ -73,11 +73,14 @@ class MainActivity : AppCompatActivity() {
             if (uri != null) start(Uri.parse(uri), lastIsFolder(), true)
         }
         root.addView(continueBtn)
+        root.addView(button("Navegar e ler online", "#1FA37A") {
+            startActivity(Intent(this, BrowserActivity::class.java))
+        })
         root.addView(button("Abrir arquivo (CBZ / ZIP)", "#6C3CE9") { pickFile.launch(arrayOf("*/*")) })
         root.addView(button("Abrir pasta de imagens", "#3B2F6B") { pickFolder.launch(null) })
 
         root.addView(TextView(this).apply {
-            text = "Toque no meio: menu · bordas: virar página\nPinça ou toque duplo: zoom"
+            text = "Toque no meio: menu · bordas: virar página\nPinça ou toque duplo: zoom\nNo navegador, o capítulo abre em tela cheia sozinho"
             setTextColor(Color.parseColor("#8A82A8"))
             textSize = 12f
             gravity = Gravity.CENTER
