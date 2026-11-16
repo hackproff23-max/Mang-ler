@@ -449,6 +449,17 @@ class GalleryImporter(private val ua: String, private val listener: Listener) {
         return false
     }
 
+    /**
+     * O link tem uma miniatura? Vale <img>, mas também miniatura desenhada como imagem de fundo
+     * (<div style="background:url(...)">), que é o formato de várias galerias e não tem <img>.
+     */
+    private fun hasThumbMedia(a: Element): Boolean {
+        if (a.selectFirst("img, picture, video[poster]") != null) return true
+        if (a.attr("style").contains("url(", ignoreCase = true)) return true
+        if (a.select("[style]").any { it.attr("style").contains("url(", ignoreCase = true) }) return true
+        return a.selectFirst("[data-src], [data-bg], [data-background], [data-thumb]") != null
+    }
+
     /** Assinatura do formato do link: segmentos com número viram "#", e os nomes de query contam. */
     private fun signature(url: String): String {
         val u = Uri.parse(url)
@@ -459,15 +470,22 @@ class GalleryImporter(private val ua: String, private val listener: Listener) {
         return (u.host?.removePrefix("www.") ?: "") + "/" + path + "?" + q
     }
 
-    /** Grupos de links com miniatura, por assinatura, e quantos de cada grupo estão em blocos "relacionados". */
-    private fun thumbGroups(doc: Document): Pair<Map<String, List<String>>, Map<String, Int>> {
+    /**
+     * Grupos de links de miniatura, por assinatura, e quantos de cada grupo estão em blocos "relacionados".
+     * No modo [loose] também entram links sem mídia detectável (exceto números de paginação);
+     * só é usado quando o modo estrito não acha nenhum grupo.
+     */
+    private fun thumbGroups(doc: Document, loose: Boolean): Pair<Map<String, List<String>>, Map<String, Int>> {
         val pageUrl = doc.location()
         val host = hostOf(pageUrl)
         val groups = LinkedHashMap<String, MutableList<String>>()
         val side = HashMap<String, Int>()
         val seen = HashSet<String>()
         for (a in doc.select("a[href]")) {
-            if (a.selectFirst("img") == null) continue
+            if (!hasThumbMedia(a)) {
+                if (!loose) continue
+                if (numberRegex.matches(a.text().trim())) continue
+            }
             if (looksLikeAd(a)) continue
             val h = a.absUrl("href").substringBefore('#')
             if (!(h.startsWith("http://") || h.startsWith("https://"))) continue
@@ -480,20 +498,33 @@ class GalleryImporter(private val ua: String, private val listener: Listener) {
         return groups to side
     }
 
-    /**
-     * Grupo de miniaturas da galeria: o de assinatura já conhecida ou, na primeira página,
-     * o que bate com a contagem anunciada ("94 pages") e não está em bloco de relacionados;
-     * sem essas pistas, o maior.
-     */
-    private fun bestGroup(doc: Document, preferSig: String?, hints: List<Int>): Pair<String, List<String>>? {
-        val (g, side) = thumbGroups(doc)
-        if (preferSig != null) return g[preferSig]?.let { preferSig to it }
+    private fun pickBest(
+        gs: Pair<Map<String, List<String>>, Map<String, Int>>,
+        hints: List<Int>,
+        minSize: Int
+    ): Pair<String, List<String>>? {
+        val (g, side) = gs
         var cands = g.entries.filter { (side[it.key] ?: 0) * 2 <= it.value.size }
         if (cands.isEmpty()) cands = g.entries.toList()
         val best = cands.filter { it.value.size in hints }.maxByOrNull { it.value.size }
             ?: cands.maxByOrNull { it.value.size }
             ?: return null
-        return if (best.value.size >= 2) best.key to best.value else null
+        return if (best.value.size >= minSize) best.key to best.value else null
+    }
+
+    /**
+     * Grupo de miniaturas da galeria: o de assinatura já conhecida ou, na primeira página,
+     * o que bate com a contagem anunciada ("94 images") e não está em bloco de relacionados;
+     * sem essas pistas, o maior. Tenta primeiro links com miniatura detectada e só depois o modo solto.
+     */
+    private fun bestGroup(doc: Document, preferSig: String?, hints: List<Int>): Pair<String, List<String>>? {
+        val strict = thumbGroups(doc, false)
+        if (preferSig != null) {
+            strict.first[preferSig]?.let { return preferSig to it }
+            return thumbGroups(doc, true).first[preferSig]?.let { preferSig to it }
+        }
+        pickBest(strict, hints, 2)?.let { return it }
+        return pickBest(thumbGroups(doc, true), hints, MIN_LOOSE)
     }
 
     private fun countHints(doc: Document): List<Int> {
@@ -508,10 +539,12 @@ class GalleryImporter(private val ua: String, private val listener: Listener) {
     // ---------------------------------------------------------------- imagem grande
 
     private fun pickMainImage(doc: Document): String? {
-        // link explícito para o original (só se apontar direto para um arquivo de imagem)
+        // link explícito para o original (só se apontar direto para um arquivo de imagem).
+        // "fullimg" é o download do original que consome cota do site: não é usado automaticamente.
         for (a in doc.select("a[href]")) {
             if (!originalRegex.containsMatchIn(a.text())) continue
             val h = a.absUrl("href")
+            if (h.contains("fullimg", ignoreCase = true)) continue
             if (h.startsWith("http") && imgExt.containsMatchIn(h)) return h
         }
 
@@ -566,6 +599,7 @@ class GalleryImporter(private val ua: String, private val listener: Listener) {
     companion object {
         private const val MAX_PAGES = 300
         private const val MAX_IMAGES = 3000
+        private const val MIN_LOOSE = 6
         private val IMG_ATTRS = listOf("src", "data-src", "data-lazy-src", "data-original", "data-url", "data-lazy")
         private val MAIN_IDS = setOf("img", "image", "main", "mainimage", "full", "photo")
 
