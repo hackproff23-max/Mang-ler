@@ -4,9 +4,12 @@ package com.mangler.reader
  * Script injetado na página do navegador para achar as imagens do capítulo/galeria.
  * Rola a página (para disparar o lazy load) e coleta as imagens em níveis:
  *  1) páginas grandes (comportamento original, nada mudou aqui);
- *  2) se nada for achado: links que apontam direto para arquivos de imagem (miniatura -> imagem grande);
- *  3) imagens menores (GIFs/WebP animados em grade, miniaturas), usando o maior arquivo do srcset;
- *  4) imagens desenhadas como fundo (background-image).
+ *  2) se nada for achado: vídeos da página (WebM/MP4), marcados com "#mv" no fim do endereço;
+ *  3) links que apontam direto para arquivos de imagem (miniatura -> imagem grande);
+ *  4) imagens menores (GIFs/WebP animados em grade, miniaturas), usando o maior arquivo do srcset;
+ *  5) imagens desenhadas como fundo (background-image).
+ * Nos níveis 3 e 4 imagens em faixa (muito mais largas que altas, ou o contrário) são ignoradas:
+ * são "sprites" com vários quadros lado a lado (prévia de vídeo), não a imagem de verdade.
  * Não usa o caractere "dólar" porque este texto passa por um template do Kotlin.
  */
 object ExtractScript {
@@ -16,13 +19,16 @@ object ExtractScript {
         (function(){
           var TOKEN='__TOKEN__';
           var EXT=['.jpg','.jpeg','.png','.webp','.gif','.avif','.bmp'];
+          var VID=['.webm','.mp4','.m4v','.mov'];
           var BAD=/logo|icon|avatar|sprite|favicon|emoji|spinner|loading|button|banner/i;
           function abs(u){try{return new URL(u,location.href).href}catch(e){return ''}}
-          function isImgUrl(u){
+          function endsIn(u,list){
             var p=(u||'').split('#')[0].split('?')[0].toLowerCase();
-            for(var i=0;i<EXT.length;i++){var e=EXT[i];if(p.length>=e.length&&p.lastIndexOf(e)===p.length-e.length)return true;}
+            for(var i=0;i<list.length;i++){var e=list[i];if(p.length>=e.length&&p.lastIndexOf(e)===p.length-e.length)return true;}
             return false;
           }
+          function isImgUrl(u){return endsIn(u,EXT);}
+          function isVidUrl(u){return endsIn(u,VID);}
           function okUrl(u){return u&&u.indexOf('data:')!==0&&u.indexOf('blob:')!==0;}
           function fromSrcset(s){
             if(!s) return '';
@@ -82,7 +88,39 @@ object ExtractScript {
             var r=im.getBoundingClientRect();
             return {w:Math.max(r.width,im.naturalWidth||0),h:Math.max(r.height,im.naturalHeight||0)};
           }
-          // nível 2: links que apontam direto para o arquivo da imagem
+          // imagem em faixa (sprite com quadros lado a lado): não é a imagem de verdade
+          function strip(im){
+            var nw=im.naturalWidth||0, nh=im.naturalHeight||0;
+            if(nw<1||nh<1) return false;
+            return nw/nh>6||nh/nw>6;
+          }
+          // nível 2: vídeos da página (WebM/MP4). O "#mv" avisa o leitor que é vídeo, mesmo sem extensão.
+          function vidOf(v){
+            var c=[v.currentSrc,v.getAttribute('src'),v.getAttribute('data-src')];
+            var ss=v.querySelectorAll('source');
+            for(var k=0;k<ss.length;k++){c.push(ss[k].getAttribute('src'));c.push(ss[k].getAttribute('data-src'));}
+            var best='';
+            for(var i=0;i<c.length;i++){
+              if(!okUrl(c[i])) continue;
+              var a=abs(c[i]);
+              if(a.indexOf('http')!==0) continue;
+              if(/\.webm/i.test(a.split('?')[0])) return a;
+              if(!best) best=a;
+            }
+            return best;
+          }
+          function collectVideos(){
+            var out=[], vs=document.querySelectorAll('video');
+            for(var i=0;i<vs.length;i++){
+              var v=vs[i], r=v.getBoundingClientRect();
+              var w=Math.max(r.width,v.videoWidth||0), h=Math.max(r.height,v.videoHeight||0);
+              if(w<100||h<100) continue;
+              var u=vidOf(v);
+              if(u) out.push(u.split('#')[0]+'#mv');
+            }
+            return dedupe(out);
+          }
+          // nível 3: links que apontam direto para o arquivo da imagem
           function collectLinks(){
             var out=[], imgs=document.images;
             for(var i=0;i<imgs.length;i++){
@@ -91,12 +129,12 @@ object ExtractScript {
               var h=abs(a.getAttribute('href')||'');
               if(h.indexOf('http')===0&&isImgUrl(h)&&!BAD.test(h)){
                 var d=dim(im);
-                if(d.w>=60&&d.h>=60) out.push(h);
+                if(d.w>=60&&d.h>=60&&!strip(im)) out.push(h);
               }
             }
             return dedupe(out);
           }
-          // nível 3: qualquer imagem razoável (GIF/WebP animado pequeno, miniaturas)
+          // nível 4: qualquer imagem razoável (GIF/WebP animado pequeno, miniaturas)
           function collectSmall(){
             var out=[], imgs=document.images;
             for(var i=0;i<imgs.length;i++){
@@ -104,11 +142,12 @@ object ExtractScript {
               if(!u||BAD.test(u)) continue;
               var d=dim(im);
               if(d.w<60||d.h<60) continue;
+              if(strip(im)) continue;
               out.push(u);
             }
             return dedupe(out);
           }
-          // nível 4: imagens de fundo
+          // nível 5: imagens de fundo
           function collectBackgrounds(){
             var out=[], els=document.querySelectorAll('div,span,a,li,figure,section');
             for(var i=0;i<els.length;i++){
@@ -126,6 +165,7 @@ object ExtractScript {
           }
           function collectAll(){
             var a=collect(); if(a.length) return a;
+            a=collectVideos(); if(a.length) return a;
             a=collectLinks(); if(a.length) return a;
             a=collectSmall(); if(a.length) return a;
             return collectBackgrounds();

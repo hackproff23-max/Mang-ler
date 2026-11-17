@@ -13,6 +13,8 @@ import java.net.URL
  * Páginas de um capítulo/galeria online: baixa cada imagem uma vez (cache em disco)
  * usando Referer, User-Agent e cookies do navegador.
  * [referers] (opcional) traz um Referer por imagem, na mesma ordem de [urls].
+ * Endereços terminados em "#mv" (ou com extensão de vídeo) são vídeos WebM/MP4: baixados do mesmo jeito,
+ * mas exibidos pelo player em tela cheia do leitor.
  */
 class WebSource(
     ctx: Context,
@@ -30,10 +32,24 @@ class WebSource(
 
     override val count: Int get() = urls.size
 
+    /** A página [i] é um vídeo (WebM/MP4)? */
+    fun isVideo(i: Int): Boolean {
+        val u = urls.getOrNull(i) ?: return false
+        if (u.substringAfter('#', "") == "mv") return true
+        val p = u.substringBefore('#').substringBefore('?').lowercase()
+        return VIDEO_EXT.any { p.endsWith(it) }
+    }
+
+    /** Baixa (se ainda não baixou) e devolve o arquivo do vídeo da página [i]. */
+    fun videoFile(i: Int): File {
+        open(i).close()
+        return File(dir, i.toString())
+    }
+
     override fun open(i: Int): InputStream {
         val f = File(dir, i.toString())
         synchronized(locks[i]) {
-            if (!f.exists()) download(urls[i], f, referers?.getOrNull(i) ?: referer)
+            if (!f.exists()) download(urls[i].substringBefore('#'), f, referers?.getOrNull(i) ?: referer)
         }
         return FileInputStream(f)
     }
@@ -64,7 +80,7 @@ class WebSource(
             conn.instanceFollowRedirects = true
             conn.setRequestProperty("User-Agent", ua)
             if (ref.isNotEmpty()) conn.setRequestProperty("Referer", ref)
-            conn.setRequestProperty("Accept", "image/avif,image/webp,image/*,*/*;q=0.8")
+            conn.setRequestProperty("Accept", "image/avif,image/webp,image/*,video/*,*/*;q=0.8")
             CookieManager.getInstance().getCookie(url)?.let { conn.setRequestProperty("Cookie", it) }
             if (conn.responseCode != 200) throw HttpStatusException(conn.responseCode, url)
             val tmp = File(dest.parentFile, dest.name + ".part")
@@ -76,4 +92,8 @@ class WebSource(
     }
 
     override fun close() {}
+
+    private companion object {
+        val VIDEO_EXT = listOf(".webm", ".mp4", ".m4v", ".mov")
+    }
 }

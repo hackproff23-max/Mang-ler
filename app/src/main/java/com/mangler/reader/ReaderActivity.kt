@@ -417,14 +417,17 @@ class ReaderActivity : AppCompatActivity() {
             .apply()
     }
 
-    /** Reaplica o ajuste nas páginas visíveis (só recalcula a matriz, sem recarregar imagem). */
+    /** Reaplica o ajuste nas páginas visíveis (só recalcula a matriz, sem recarregar imagem nem vídeo). */
     private fun pushSizing() {
         val a = adapter ?: return
         a.sizing = sizing
         a.insets = insets
         val rv = pager.getChildAt(0) as? RecyclerView ?: return
         for (i in 0 until rv.childCount) {
-            (rv.getChildAt(i) as? ZoomImageView)?.configure(sizing, insets[0], insets[1], insets[2], insets[3])
+            when (val c = rv.getChildAt(i)) {
+                is ZoomImageView -> c.configure(sizing, insets[0], insets[1], insets[2], insets[3])
+                is VideoPageView -> c.configure(sizing, insets[0], insets[1], insets[2], insets[3])
+            }
         }
     }
 
@@ -747,56 +750,103 @@ class PageAdapter(
     private val originalPages = HashSet<Int>()
     private val loadingOriginal = HashSet<Int>()
     private val bound = HashMap<Int, VH>()
-    // única página cuja animação está tocando (as vizinhas ficam paradas para poupar CPU e bateria)
+    // única página cuja animação/vídeo está tocando (as vizinhas ficam paradas para poupar CPU e bateria)
     private var playingPos = -1
+    private val mainH = Handler(Looper.getMainLooper())
 
-    class VH(val img: ZoomImageView) : RecyclerView.ViewHolder(img)
+    /** A view da página é um [ZoomImageView] (imagem/GIF) ou um [VideoPageView] (WebM/MP4). */
+    class VH(val view: View) : RecyclerView.ViewHolder(view)
+
+    private fun isVideo(pos: Int) = (src as? WebSource)?.isVideo(pos) == true
+
+    override fun getItemViewType(position: Int) = if (isVideo(position)) VIEW_VIDEO else VIEW_IMAGE
 
     private fun setPlaying(d: android.graphics.drawable.Drawable?, play: Boolean) {
         val a = d as? android.graphics.drawable.Animatable ?: return
         if (play) { if (!a.isRunning) a.start() } else if (a.isRunning) a.stop()
     }
 
-    /** Toca a animação da página [pos] e para as demais (-1 para tudo). */
+    private fun setViewPlaying(v: View, play: Boolean) {
+        when (v) {
+            is VideoPageView -> v.play(play)
+            is ZoomImageView -> setPlaying(v.drawable, play)
+        }
+    }
+
+    /** Toca a animação/vídeo da página [pos] e para os demais (-1 para tudo). */
     fun playOnly(pos: Int) {
         playingPos = pos
-        for ((p, h) in bound) setPlaying(h.img.drawable, p == pos)
+        for ((p, h) in bound) setViewPlaying(h.view, p == pos)
     }
 
     fun isOriginal(pos: Int) = !settings.reducedFirst || pos in originalPages
     fun isLoadingOriginal(pos: Int) = pos in loadingOriginal
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): VH {
-        val v = ZoomImageView(parent.context)
+        val v: View = if (viewType == VIEW_VIDEO) {
+            VideoPageView(parent.context).also { it.onTap = onTap }
+        } else {
+            ZoomImageView(parent.context).also { it.onTap = onTap }
+        }
         v.layoutParams = ViewGroup.LayoutParams(-1, -1)
-        v.onTap = onTap
         return VH(v)
     }
 
     override fun getItemCount() = src.count
 
     override fun onBindViewHolder(holder: VH, position: Int) {
-        holder.img.setImageDrawable(null)
-        holder.img.sourceScale = 1f
-        holder.img.configure(sizing, insets[0], insets[1], insets[2], insets[3])
-        holder.img.tag = position
+        val v = holder.view
+        if (v is VideoPageView) {
+            bindVideo(holder, v, position)
+            return
+        }
+        val img = v as ZoomImageView
+        img.setImageDrawable(null)
+        img.sourceScale = 1f
+        img.configure(sizing, insets[0], insets[1], insets[2], insets[3])
+        img.tag = position
         bound[position] = holder
-        holder.img.onNeedOriginal = { if (!isOriginal(position)) requestOriginal(position) }
+        img.onNeedOriginal = { if (!isOriginal(position)) requestOriginal(position) }
 
         val pct = if (isOriginal(position)) 0 else settings.reducePct
         loader.request(position, pct, object : PageLoader.Cb {
-            override fun active() = holder.img.tag == position
-            override fun onLoaded(l: Loaded) = show(holder, l)
+            override fun active() = img.tag == position
+            override fun onLoaded(l: Loaded) = show(img, l)
             override fun onError() {}
         })
     }
 
+    /** Vídeo: baixa o arquivo em segundo plano e entrega ao player da página (que toca em tela cheia). */
+    private fun bindVideo(holder: VH, v: VideoPageView, position: Int) {
+        v.clear()
+        v.configure(sizing, insets[0], insets[1], insets[2], insets[3])
+        v.tag = position
+        bound[position] = holder
+        val ws = src as? WebSource ?: return
+        Thread {
+            val f = try { ws.videoFile(position) } catch (_: Throwable) { null }
+            if (f != null) {
+                mainH.post {
+                    if (v.tag == position) {
+                        v.setFile(f)
+                        v.play(position == playingPos)
+                    }
+                }
+            }
+        }.start()
+    }
+
     override fun onViewRecycled(holder: VH) {
-        val pos = holder.img.tag as? Int
-        holder.img.tag = -1
-        setPlaying(holder.img.drawable, false)
-        holder.img.setImageDrawable(null)
-        holder.img.sourceScale = 1f
+        val v = holder.view
+        val pos = v.tag as? Int
+        v.tag = -1
+        if (v is VideoPageView) {
+            v.clear()
+        } else if (v is ZoomImageView) {
+            setPlaying(v.drawable, false)
+            v.setImageDrawable(null)
+            v.sourceScale = 1f
+        }
         if (pos != null && pos >= 0) {
             if (bound[pos] === holder) bound.remove(pos)
             if (loadingOriginal.remove(pos)) onOriginalState(pos, false)
@@ -804,31 +854,31 @@ class PageAdapter(
     }
 
     /** Mostra a página; se já havia uma versão, troca mantendo zoom e posição. */
-    private fun show(holder: VH, l: Loaded) {
+    private fun show(img: ZoomImageView, l: Loaded) {
         // animada: o drawable já reproduz os quadros; estática: bitmap comum
-        val d = l.anim ?: android.graphics.drawable.BitmapDrawable(holder.img.resources, l.bmp)
-        if (holder.img.drawable != null) {
-            holder.img.swapDrawable(d, l.sourceScale)
+        val d = l.anim ?: android.graphics.drawable.BitmapDrawable(img.resources, l.bmp)
+        if (img.drawable != null) {
+            img.swapDrawable(d, l.sourceScale)
         } else {
-            holder.img.sourceScale = l.sourceScale
-            holder.img.configure(sizing, insets[0], insets[1], insets[2], insets[3])
-            holder.img.setImageDrawable(d)
+            img.sourceScale = l.sourceScale
+            img.configure(sizing, insets[0], insets[1], insets[2], insets[3])
+            img.setImageDrawable(d)
         }
-        setPlaying(d, (holder.img.tag as? Int) == playingPos)
+        setPlaying(d, (img.tag as? Int) == playingPos)
     }
 
     /** Pede a qualidade original da página (por zoom ou pelo botão). Não baixa nada antes disso. */
     fun requestOriginal(pos: Int) {
-        if (pos in originalPages) return
+        if (isVideo(pos) || pos in originalPages) return
         originalPages.add(pos)
-        val holder = bound[pos] ?: return
+        val img = bound[pos]?.view as? ZoomImageView ?: return
         loadingOriginal.add(pos)
         onOriginalState(pos, true)
         loader.request(pos, 0, object : PageLoader.Cb {
-            override fun active() = holder.img.tag == pos
+            override fun active() = img.tag == pos
             override fun onLoaded(l: Loaded) {
                 loadingOriginal.remove(pos)
-                show(holder, l)
+                show(img, l)
                 onOriginalState(pos, false)
             }
             override fun onError() {
@@ -841,17 +891,22 @@ class PageAdapter(
 
     /** Botão do painel: carrega a original ou volta à reduzida (sem baixar de novo). */
     fun toggleOriginal(pos: Int) {
-        if (!settings.reducedFirst || pos in loadingOriginal) return
+        if (isVideo(pos) || !settings.reducedFirst || pos in loadingOriginal) return
         if (pos in originalPages) {
             originalPages.remove(pos)
-            val holder = bound[pos] ?: return
+            val img = bound[pos]?.view as? ZoomImageView ?: return
             loader.request(pos, settings.reducePct, object : PageLoader.Cb {
-                override fun active() = holder.img.tag == pos
-                override fun onLoaded(l: Loaded) { show(holder, l); onOriginalState(pos, false) }
+                override fun active() = img.tag == pos
+                override fun onLoaded(l: Loaded) { show(img, l); onOriginalState(pos, false) }
                 override fun onError() {}
             })
         } else {
             requestOriginal(pos)
         }
+    }
+
+    private companion object {
+        const val VIEW_IMAGE = 0
+        const val VIEW_VIDEO = 1
     }
 }
