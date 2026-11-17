@@ -443,58 +443,9 @@ class BrowserActivity : AppCompatActivity() {
             }
         }, 30000)
 
-        web.evaluateJavascript(extractJs.replace("__TOKEN__", token), null)
+        // Rola a página (lazy load) e coleta as imagens; o script está em ExtractScript
+        web.evaluateJavascript(ExtractScript.JS.replace(ExtractScript.TOKEN, token), null)
     }
-
-    // Rola a página para forçar o carregamento das imagens (lazy load) e coleta as páginas
-    private val extractJs = """
-        (function(){
-          var TOKEN='__TOKEN__';
-          function abs(u){try{return new URL(u,location.href).href}catch(e){return ''}}
-          function pick(im){
-            var c=[im.currentSrc,im.src,im.getAttribute('data-src'),im.getAttribute('data-lazy-src'),im.getAttribute('data-original'),im.getAttribute('data-url')];
-            for(var i=0;i<c.length;i++){
-              var u=c[i];
-              if(u&&u.indexOf('data:')!==0&&u.indexOf('blob:')!==0){
-                var a=abs(u);
-                if(a.indexOf('http')===0) return a;
-              }
-            }
-            return '';
-          }
-          function collect(){
-            var imgs=document.images, items=[], maxW=0;
-            for(var i=0;i<imgs.length;i++){
-              var im=imgs[i], u=pick(im);
-              if(!u) continue;
-              var r=im.getBoundingClientRect();
-              var w=r.width||im.naturalWidth, h=r.height||im.naturalHeight;
-              if(w<200||h<200) continue;
-              items.push({u:u,w:w});
-              if(w>maxW) maxW=w;
-            }
-            var seen={}, out=[];
-            for(var j=0;j<items.length;j++){
-              if(items[j].w>=maxW*0.6 && !seen[items[j].u]){seen[items[j].u]=1;out.push(items[j].u);}
-            }
-            return out;
-          }
-          var steps=0, y=window.scrollY||0;
-          var timer=setInterval(function(){
-            steps++;
-            y+=Math.max(window.innerHeight*0.9,300);
-            window.scrollTo(0,y);
-            var H=Math.max(document.documentElement.scrollHeight, document.body?document.body.scrollHeight:0);
-            if(y>=H+200||steps>=60){
-              clearInterval(timer);
-              setTimeout(function(){
-                window.scrollTo(0,0);
-                ManglerBridge.onImages(TOKEN, JSON.stringify(collect()));
-              },800);
-            }
-          },250);
-        })();
-    """.trimIndent()
 
     // ---------- Menu e favoritos ----------
 
