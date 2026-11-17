@@ -164,13 +164,22 @@ class ZoomImageView @JvmOverloads constructor(
         baseScaleY *= k
         sourceScale = newSource
         super.setImageDrawable(d)
+        updateLayer(d)
         clamp()
         imageMatrix = m
     }
 
     override fun setImageDrawable(drawable: Drawable?) {
         super.setImageDrawable(drawable)
+        updateLayer(drawable)
         resetFit()
+    }
+
+    /** O GIF do Android antigo (Movie) só desenha direito sem aceleração de hardware. */
+    private fun updateLayer(d: Drawable?) {
+        val soft = d is MovieDrawable
+        val want = if (soft) LAYER_TYPE_SOFTWARE else LAYER_TYPE_NONE
+        if (layerType != want) setLayerType(want, null)
     }
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {

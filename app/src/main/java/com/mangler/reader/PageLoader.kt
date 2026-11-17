@@ -5,9 +5,19 @@ import android.content.Context
 import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.ImageDecoder
+import android.graphics.Movie
+import android.graphics.drawable.Animatable
+import android.graphics.drawable.Drawable
+import android.os.Build
 import android.os.Handler
 import android.util.LruCache
+import androidx.annotation.RequiresApi
+import java.io.BufferedInputStream
+import java.io.DataInputStream
 import java.io.IOException
+import java.io.InputStream
+import java.nio.ByteBuffer
 import java.util.concurrent.PriorityBlockingQueue
 import java.util.concurrent.ThreadPoolExecutor
 import java.util.concurrent.TimeUnit
@@ -42,15 +52,33 @@ data class LoadSettings(
     }
 }
 
-/** Página decodificada. [origW] é a largura do arquivo original; [sourceScale] = pixels originais por pixel do bitmap. */
-class Loaded(val bmp: Bitmap, val origW: Int, val original: Boolean) {
-    val sourceScale: Float get() = origW.toFloat() / bmp.width
+/**
+ * Página decodificada. Estática: [bmp]. Animada: [anim] (drawable que reproduz os quadros sozinho,
+ * decodificando um por vez). [origW] é a largura do arquivo original;
+ * [sourceScale] = pixels originais por pixel exibido.
+ */
+class Loaded(
+    val bmp: Bitmap?,
+    val origW: Int,
+    val original: Boolean,
+    val anim: Drawable? = null,
+    /** Mantém referência aos bytes de origem enquanto a animação existir. */
+    @Suppress("unused") val data: Any? = null,
+    approxBytes: Int = 0
+) {
+    val width: Int get() = (bmp?.width ?: anim?.intrinsicWidth ?: 1).coerceAtLeast(1)
+    val sourceScale: Float get() = origW.toFloat() / width
+    val isAnimated: Boolean get() = anim != null
+
+    /** Custo aproximado em memória, usado pelo cache. */
+    val cost: Int = if (approxBytes > 0) approxBytes else (bmp?.allocationByteCount ?: 1)
 }
 
 /**
  * Único ponto de decodificação das páginas: fila com prioridade (página atual primeiro),
  * tarefas descartadas quando a página deixa de ser necessária, sem trabalho duplicado
  * e com cache em memória que separa versão reduzida (por percentual) e original.
+ * Reconhece GIF, WebP animado e APNG e mantém a animação (não converte em imagem estática).
  * Os arquivos de origem nunca são alterados.
  */
 class PageLoader(private val ctx: Context, private val src: PageSource, private val ui: Handler) {
@@ -75,7 +103,7 @@ class PageLoader(private val ctx: Context, private val src: PageSource, private 
     private val pixelBudget: Long = minOf(maxMem / 6, 96L * 1024 * 1024) / 4
 
     private val cache = object : LruCache<String, Loaded>((maxMem / 8).toInt().coerceAtLeast(8 * 1024 * 1024)) {
-        override fun sizeOf(key: String, value: Loaded) = value.bmp.allocationByteCount
+        override fun sizeOf(key: String, value: Loaded) = value.cost
     }
 
     private val pool = ThreadPoolExecutor(
@@ -191,6 +219,22 @@ class PageLoader(private val ctx: Context, private val src: PageSource, private 
     }
 
     private fun decode(index: Int, pct: Int): Loaded {
+        // Animações (GIF, WebP animado, APNG) mantêm todos os quadros; se não der, cai no caminho estático
+        val kind = sniff(index)
+        if (kind != Kind.STATIC) {
+            val a = try {
+                if (Build.VERSION.SDK_INT >= 28) decodeAnimated(index, pct)
+                else if (kind == Kind.GIF) decodeMovie(index, pct)
+                else null
+            } catch (_: Exception) {
+                null
+            }
+            if (a != null) return a
+        }
+        return decodeStatic(index, pct)
+    }
+
+    private fun decodeStatic(index: Int, pct: Int): Loaded {
         val b = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         src.open(index).use { BitmapFactory.decodeStream(it, null, b) }
         val ow = b.outWidth
@@ -226,5 +270,133 @@ class PageLoader(private val ctx: Context, private val src: PageSource, private 
             bmp = scaled
         }
         return Loaded(bmp, ow, false)
+    }
+
+    // ---------------------------------------------------------------- animações
+
+    private enum class Kind { STATIC, GIF, WEBP_ANIM, APNG }
+
+    /** Descobre pelo cabeçalho do arquivo (não pela extensão) se a imagem é animada. */
+    private fun sniff(index: Int): Kind {
+        val head = ByteArray(32)
+        val n = try {
+            src.open(index).use { readUpTo(it, head) }
+        } catch (_: IOException) {
+            return Kind.STATIC
+        }
+        fun at(i: Int, c: Char) = i < n && head[i] == c.code.toByte()
+        // GIF87a / GIF89a
+        if (at(0, 'G') && at(1, 'I') && at(2, 'F')) return Kind.GIF
+        // WebP animado: RIFF....WEBPVP8X com a flag de animação (bit 1 dos flags)
+        if (at(0, 'R') && at(1, 'I') && at(2, 'F') && at(3, 'F') && at(8, 'W') && at(9, 'E') && at(10, 'B') && at(11, 'P') &&
+            at(12, 'V') && at(13, 'P') && at(14, '8') && at(15, 'X') && n > 20 && (head[20].toInt() and 0x02) != 0
+        ) return Kind.WEBP_ANIM
+        // APNG: PNG com o bloco acTL antes dos dados da imagem
+        if (n >= 8 && head[0] == 0x89.toByte() && at(1, 'P') && at(2, 'N') && at(3, 'G') && hasActl(index)) return Kind.APNG
+        return Kind.STATIC
+    }
+
+    private fun readUpTo(ins: InputStream, buf: ByteArray): Int {
+        var off = 0
+        while (off < buf.size) {
+            val r = ins.read(buf, off, buf.size - off)
+            if (r < 0) break
+            off += r
+        }
+        return off
+    }
+
+    private fun hasActl(index: Int): Boolean {
+        return try {
+            src.open(index).use { raw ->
+                val ins = DataInputStream(BufferedInputStream(raw, 8192))
+                skipFully(ins, 8)
+                var found = false
+                for (i in 0 until 64) {
+                    val len = ins.readInt()
+                    val type = ins.readInt()
+                    if (type == 0x6163544C) { found = true; break }   // "acTL"
+                    if (type == 0x49444154) break                      // "IDAT": acTL já não pode vir
+                    skipFully(ins, len.toLong() + 4)                   // dados + CRC
+                }
+                found
+            }
+        } catch (_: IOException) {
+            false
+        }
+    }
+
+    private fun skipFully(ins: InputStream, count: Long) {
+        var left = count
+        while (left > 0) {
+            val s = ins.skip(left)
+            if (s > 0) left -= s
+            else {
+                if (ins.read() < 0) throw java.io.EOFException()
+                left--
+            }
+        }
+    }
+
+    /** Tamanho de exibição da animação: mesma regra da versão estática, com orçamento menor de pixels. */
+    private fun animTarget(ow: Int, oh: Int, pct: Int): Pair<Int, Int> {
+        val budget = pixelBudget / 2
+        var tw = ow
+        var th = oh
+        if (pct > 0) {
+            val s = 1f - 0.75f * pct / 100f
+            val floor = minOf(ow, ctx.resources.displayMetrics.widthPixels).toFloat() / ow
+            val s2 = maxOf(s, floor)
+            tw = (ow * s2).roundToInt().coerceAtLeast(1)
+            th = (oh * s2).roundToInt().coerceAtLeast(1)
+        }
+        if (tw.toLong() * th > budget) {
+            val f = sqrt(budget.toDouble() / (tw.toLong() * th)).toFloat()
+            tw = (tw * f).roundToInt().coerceAtLeast(1)
+            th = (th * f).roundToInt().coerceAtLeast(1)
+        }
+        return tw to th
+    }
+
+    /**
+     * Android 9+: AnimatedImageDrawable (GIF, WebP animado e, conforme o sistema, APNG).
+     * Os quadros são decodificados um a um durante a reprodução, na resolução alvo; duração de cada quadro,
+     * transparência e repetição vêm do próprio arquivo. Devolve null se o arquivo não ficou animado.
+     */
+    @RequiresApi(28)
+    private fun decodeAnimated(index: Int, pct: Int): Loaded? {
+        val bytes = src.open(index).use { it.readBytes() }
+        if (bytes.size > MAX_ANIM_BYTES) return null
+        val buf = ByteBuffer.wrap(bytes)
+        var ow = 0
+        var oh = 0
+        val d = ImageDecoder.decodeDrawable(ImageDecoder.createSource(buf)) { decoder, info, _ ->
+            ow = info.size.width
+            oh = info.size.height
+            val (tw, th) = animTarget(ow, oh, pct)
+            if (tw != ow || th != oh) decoder.setTargetSize(tw, th)
+        }
+        if (ow <= 0 || oh <= 0 || d !is Animatable) return null
+        val approx = bytes.size + d.intrinsicWidth * d.intrinsicHeight * 4 * 2
+        return Loaded(null, ow, pct <= 0, anim = d, data = buf, approxBytes = approx)
+    }
+
+    /**
+     * Android 5 a 8: só GIF, via Movie (quadros, duração e repetição preservados).
+     * Aqui a redução de resolução não diminui o consumo (o Movie decodifica no tamanho original).
+     */
+    private fun decodeMovie(index: Int, pct: Int): Loaded? {
+        val bytes = src.open(index).use { it.readBytes() }
+        if (bytes.size > MAX_ANIM_BYTES) return null
+        val mv = Movie.decodeByteArray(bytes, 0, bytes.size) ?: return null
+        if (mv.duration() <= 0 || mv.width() <= 0 || mv.height() <= 0) return null
+        val d = MovieDrawable(mv)
+        val approx = bytes.size + mv.width() * mv.height() * 4
+        return Loaded(null, mv.width(), pct <= 0, anim = d, data = bytes, approxBytes = approx)
+    }
+
+    private companion object {
+        /** Animações maiores que isto caem para a primeira imagem (evita estourar a memória). */
+        const val MAX_ANIM_BYTES = 40 * 1024 * 1024
     }
 }

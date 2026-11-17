@@ -640,6 +640,7 @@ class ReaderActivity : AppCompatActivity() {
         val start = startPage.coerceIn(0, s.count - 1)
         l.current = start
         pager.setCurrentItem(start, false)
+        a.playOnly(start)
         l.preload(settings, start)
         updateLabel(start)
         pager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
@@ -647,6 +648,7 @@ class ReaderActivity : AppCompatActivity() {
                 updateLabel(position)
                 // página atual passa a ter prioridade; tarefas de páginas fora da janela são descartadas
                 loader?.current = position
+                adapter?.playOnly(position)
                 loader?.preload(settings, position)
                 hdBadge.visibility = if (adapter?.isLoadingOriginal(position) == true) View.VISIBLE else View.GONE
                 updateOriginalButton()
@@ -694,6 +696,16 @@ class ReaderActivity : AppCompatActivity() {
         if (hasFocus) enterImmersive()
     }
 
+    override fun onPause() {
+        super.onPause()
+        adapter?.playOnly(-1)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        adapter?.playOnly(pager.currentItem)
+    }
+
     override fun onLowMemory() {
         super.onLowMemory()
         loader?.trim()
@@ -735,8 +747,21 @@ class PageAdapter(
     private val originalPages = HashSet<Int>()
     private val loadingOriginal = HashSet<Int>()
     private val bound = HashMap<Int, VH>()
+    // única página cuja animação está tocando (as vizinhas ficam paradas para poupar CPU e bateria)
+    private var playingPos = -1
 
     class VH(val img: ZoomImageView) : RecyclerView.ViewHolder(img)
+
+    private fun setPlaying(d: android.graphics.drawable.Drawable?, play: Boolean) {
+        val a = d as? android.graphics.drawable.Animatable ?: return
+        if (play) { if (!a.isRunning) a.start() } else if (a.isRunning) a.stop()
+    }
+
+    /** Toca a animação da página [pos] e para as demais (-1 para tudo). */
+    fun playOnly(pos: Int) {
+        playingPos = pos
+        for ((p, h) in bound) setPlaying(h.img.drawable, p == pos)
+    }
 
     fun isOriginal(pos: Int) = !settings.reducedFirst || pos in originalPages
     fun isLoadingOriginal(pos: Int) = pos in loadingOriginal
@@ -769,6 +794,7 @@ class PageAdapter(
     override fun onViewRecycled(holder: VH) {
         val pos = holder.img.tag as? Int
         holder.img.tag = -1
+        setPlaying(holder.img.drawable, false)
         holder.img.setImageDrawable(null)
         holder.img.sourceScale = 1f
         if (pos != null && pos >= 0) {
@@ -779,7 +805,8 @@ class PageAdapter(
 
     /** Mostra a página; se já havia uma versão, troca mantendo zoom e posição. */
     private fun show(holder: VH, l: Loaded) {
-        val d = android.graphics.drawable.BitmapDrawable(holder.img.resources, l.bmp)
+        // animada: o drawable já reproduz os quadros; estática: bitmap comum
+        val d = l.anim ?: android.graphics.drawable.BitmapDrawable(holder.img.resources, l.bmp)
         if (holder.img.drawable != null) {
             holder.img.swapDrawable(d, l.sourceScale)
         } else {
@@ -787,6 +814,7 @@ class PageAdapter(
             holder.img.configure(sizing, insets[0], insets[1], insets[2], insets[3])
             holder.img.setImageDrawable(d)
         }
+        setPlaying(d, (holder.img.tag as? Int) == playingPos)
     }
 
     /** Pede a qualidade original da página (por zoom ou pelo botão). Não baixa nada antes disso. */
